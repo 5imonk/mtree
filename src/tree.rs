@@ -29,6 +29,26 @@ where
     root_mutex: Mutex<()>,
 }
 
+impl<K, V, D, S> Clone for MTree<K, V, D, S>
+where
+    K: Clone + Send + Sync,
+    V: Send + Sync,
+    D: DistanceType,
+    S: NodeStats<K, V>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            min_node_size: self.min_node_size,
+            max_node_size: self.max_node_size,
+            split_sampling: self.split_sampling,
+            root: self.root.clone(),  // Arc wird geklont (shared ownership)
+            entries: self.entries.clone(),  // Vec und Arcs werden geklont
+            distance_fn: self.distance_fn.clone_box(),  // Distance-Funktion wird geklont
+            root_mutex: Mutex::new(()),  // Neuer Mutex für den Klon
+        }
+    }
+}
+
 /// Trait für Distanztypen
 pub trait DistanceType: Copy + Send + Sync + PartialOrd + 'static {
     fn infinity() -> Self;
