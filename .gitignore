@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Criterion benchmarks
+target/criterion/
+
+# Test artifacts
+*.orig
+
+# Environment files
+.env
+.env.local
+
+# Documentation
+/target/doc/
+
+# Backup files
+*.bak
+*.tmp
