@@ -398,6 +398,18 @@ mod tests {
     }
 
     #[test]
+    fn test_entry_id_slot_index() {
+        let mut tree = new_tree_i64();
+        let id0 = tree.insert((0, 0), "a".to_string()).unwrap();
+        let id1 = tree.insert((1, 0), "b".to_string()).unwrap();
+        assert_eq!(id0.slot_index(), 0);
+        assert_eq!(id1.slot_index(), 1);
+        assert!(tree.erase_by_id(id0));
+        let id2 = tree.insert((2, 0), "c".to_string()).unwrap();
+        assert_eq!(id2.slot_index(), 0); // slot recycled
+    }
+
+    #[test]
     fn test_duplicate_insert() {
         let mut tree = new_tree_i64();
         tree.insert((1, 2), "a".to_string()).unwrap();

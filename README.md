@@ -69,6 +69,10 @@ let key   = tree.get(id).map(|n| n.key());
 // Nach erase_by_id: ID ungültig (Slot kann später recycelt werden)
 tree.erase_by_id(id);
 assert!(tree.get(id).is_none());
+
+// Paralleles Side-Array (optional): dichter Slot-Index ohne unsafe
+let slot = id.slot_index();
+// side_table[slot] = …
 ```
 
 Updates über dieselbe ID:

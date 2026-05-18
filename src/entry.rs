@@ -20,6 +20,15 @@ impl EntryId {
     }
 
     pub(crate) fn index(self) -> usize {
+        self.slot_index()
+    }
+
+    /// Dichter Slot-Index in `MTree::by_id` (0-basiert).
+    ///
+    /// Nach `erase_by_id` ist die `EntryId` ungültig; bei Slot-Recycle kann dieselbe
+    /// `EntryId` einen anderen Eintrag bezeichnen — für parallele Side-Tables nur mit
+    /// Vorsicht oder später mit Generation nutzen.
+    pub fn slot_index(self) -> usize {
         self.0.get() as usize - 1
     }
 }
