@@ -398,6 +398,20 @@ mod tests {
     }
 
     #[test]
+    fn test_iter_all_entries() {
+        let mut tree = new_tree_i64();
+        let id_a = tree.insert((1, 2), "a".to_string()).unwrap();
+        let id_b = tree.insert((3, 4), "b".to_string()).unwrap();
+        let payloads: Vec<_> = tree.iter().map(|n| n.payload()).collect();
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads.contains(&"a".to_string()));
+        assert!(payloads.contains(&"b".to_string()));
+        assert!(tree.erase_by_id(id_a));
+        assert_eq!(tree.iter().count(), 1);
+        assert_eq!(tree.iter().next().unwrap().id, id_b);
+    }
+
+    #[test]
     fn test_entry_id_slot_index() {
         let mut tree = new_tree_i64();
         let id0 = tree.insert((0, 0), "a".to_string()).unwrap();

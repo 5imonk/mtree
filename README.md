@@ -41,6 +41,11 @@ let mut tree = MTree::with_distance(Euclid2d);
 let id = tree.insert((1, 2), "Raum A".to_string()).unwrap();
 let _ = tree.insert((3, 4), "Raum B".to_string()).unwrap();
 
+// Alle Einträge (schnell: Scan über internen Index, keine Metrik)
+for node in tree.iter() {
+    let _ = (node.key(), node.payload());
+}
+
 // Metrische Suche
 let nearby = tree.knn_search(&(1, 2), 5);
 

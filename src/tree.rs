@@ -258,6 +258,22 @@ where
 
 impl<K, V, D, S> MTree<K, V, D, S>
 where
+    K: Clone + Send + Sync,
+    V: Send + Sync,
+    D: DistanceType,
+    S: NodeStats<K, V>,
+{
+    /// Iteriert über alle Einträge (O(Kapazität von `by_id`), keine Distanzberechnung).
+    ///
+    /// Reihenfolge: aufsteigend nach Slot-Index, nicht Insert-Reihenfolge.
+    /// Leere Slots nach `erase` werden übersprungen.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<ObjectNode<K, V, S>>> + '_ {
+        self.by_id.iter().filter_map(|slot| slot.as_ref())
+    }
+}
+
+impl<K, V, D, S> MTree<K, V, D, S>
+where
     K: Clone + Send + Sync + Hash + Eq + Default,
     V: Send + Sync,
     D: DistanceType,
