@@ -2,7 +2,8 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use crate::entry::EntryId;
 use crate::stats::NodeStats;
 
 /// Basis-Trait für Knoten
@@ -19,9 +20,10 @@ pub struct ObjectNode<K, V, S = crate::stats::DescendantCounter>
 where
     S: crate::stats::NodeStats<K, V>,
 {
-    pub value: (K, V),
-    pub parent: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
-    pub parent_distance: f64,
+    pub id: EntryId,
+    pub value: RwLock<(K, V)>,
+    parent: Mutex<Option<Arc<Mutex<RoutingNode<K, V, S>>>>>,
+    parent_distance: Mutex<f64>,
 }
 
 unsafe impl<K: Send, V: Send, S: Send> Send for ObjectNode<K, V, S> where S: crate::stats::NodeStats<K, V> {}
@@ -31,26 +33,49 @@ impl<K, V, S> ObjectNode<K, V, S>
 where
     S: crate::stats::NodeStats<K, V> + Default,
 {
-    pub fn new(key: K, value: V) -> Self {
+    pub fn new(id: EntryId, key: K, value: V) -> Self {
         Self {
-            value: (key, value),
-            parent: None,
-            parent_distance: 0.0,
+            id,
+            value: RwLock::new((key, value)),
+            parent: Mutex::new(None),
+            parent_distance: Mutex::new(0.0),
         }
     }
 }
 
-impl<K, V, S> Node<K> for ObjectNode<K, V, S>
+impl<K, V, S> ObjectNode<K, V, S>
 where
-    K: Send + Sync,
     S: crate::stats::NodeStats<K, V>,
 {
-    fn get_key(&self) -> &K {
-        &self.value.0
+    pub fn parent(&self) -> Option<Arc<Mutex<RoutingNode<K, V, S>>>> {
+        self.parent.lock().unwrap().clone()
     }
-    
-    fn parent_distance(&self) -> f64 {
-        self.parent_distance
+
+    pub fn set_parent(
+        &self,
+        parent: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
+        distance: f64,
+    ) {
+        *self.parent.lock().unwrap() = parent;
+        *self.parent_distance.lock().unwrap() = distance;
+    }
+
+    pub fn dist_to_parent(&self) -> f64 {
+        *self.parent_distance.lock().unwrap()
+    }
+
+    pub fn key(&self) -> K
+    where
+        K: Clone,
+    {
+        self.value.read().unwrap().0.clone()
+    }
+
+    pub fn payload(&self) -> V
+    where
+        V: Clone,
+    {
+        self.value.read().unwrap().1.clone()
     }
 }
 
@@ -151,7 +176,7 @@ where
         K: Clone,
     {
         match self {
-            NodePtr::Object(node) => node.value.0.clone(),
+            NodePtr::Object(node) => node.key(),
             NodePtr::Routing(node) => {
                 let node = node.lock().unwrap();
                 node.key.clone()
@@ -161,7 +186,7 @@ where
     
     pub fn parent_distance(&self) -> f64 {
         match self {
-            NodePtr::Object(node) => node.parent_distance,
+            NodePtr::Object(node) => node.dist_to_parent(),
             NodePtr::Routing(node) => {
                 let node = node.lock().unwrap();
                 node.parent_distance

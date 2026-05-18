@@ -96,7 +96,7 @@ fn bench_insert(c: &mut Criterion) {
                 || new_tree(),
                 |mut tree| {
                     for (k, v) in data {
-                        tree.insert(*k, v.clone());
+                        tree.insert(*k, v.clone()).unwrap();
                     }
                     black_box(tree.size())
                 },
@@ -127,7 +127,7 @@ fn bench_range_search(c: &mut Criterion) {
         let data = gen_data(n, 123);
         let mut tree = new_tree();
         for (k, v) in &data {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         let tree = std::sync::Arc::new(std::sync::Mutex::new(tree));
         group.bench_with_input(
@@ -164,7 +164,7 @@ fn bench_search_min_max(c: &mut Criterion) {
         let data = gen_data(n, 456);
         let mut tree = new_tree();
         for (k, v) in &data {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         let tree = std::sync::Arc::new(std::sync::Mutex::new(tree));
         group.bench_with_input(
@@ -200,7 +200,7 @@ fn bench_knn_search(c: &mut Criterion) {
         let data = gen_data(n, 789);
         let mut tree = new_tree();
         for (k, v) in &data {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         let tree = std::sync::Arc::new(std::sync::Mutex::new(tree));
         let tree_clone = tree.clone();
@@ -238,13 +238,13 @@ fn bench_erase(c: &mut Criterion) {
                     || {
                         let mut tree = new_tree();
                         for (k, v) in data {
-                            tree.insert(*k, v.clone());
+                            tree.insert(*k, v.clone()).unwrap();
                         }
                         tree
                     },
                     |mut tree| {
                         for key in to_erase {
-                            tree.erase(&key);
+                            tree.erase_by_key(&key);
                         }
                         black_box(tree.size())
                     },
@@ -331,7 +331,7 @@ fn bench_point_insert(c: &mut Criterion) {
                 || MTree::<Point, String, f64>::with_distance(EuclideanDistance),
                 |mut tree| {
                     for (k, v) in data {
-                        tree.insert(k.clone(), v.clone());
+                        tree.insert(k.clone(), v.clone()).unwrap();
                     }
                     black_box(tree.size())
                 },
@@ -367,7 +367,7 @@ fn bench_point_range_search(c: &mut Criterion) {
         let mut point_tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
-            point_tree.insert(k.clone(), v.clone());
+            point_tree.insert(k.clone(), v.clone()).unwrap();
         }
         let point_tree = std::sync::Arc::new(std::sync::Mutex::new(point_tree));
         
@@ -410,7 +410,7 @@ fn bench_point_knn_search(c: &mut Criterion) {
         let mut point_tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
-            point_tree.insert(k.clone(), v.clone());
+            point_tree.insert(k.clone(), v.clone()).unwrap();
         }
         let point_tree = std::sync::Arc::new(std::sync::Mutex::new(point_tree));
         
@@ -454,13 +454,13 @@ fn bench_point_erase(c: &mut Criterion) {
                     || {
                         let mut tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
                         for (k, v) in data {
-                            tree.insert(k.clone(), v.clone());
+                            tree.insert(k.clone(), v.clone()).unwrap();
                         }
                         tree
                     },
                     |mut tree| {
                         for key in to_erase {
-                            tree.erase(&key);
+                            tree.erase_by_key(&key);
                         }
                         black_box(tree.size())
                     },
@@ -472,6 +472,45 @@ fn bench_point_erase(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_entry_id_ops(c: &mut Criterion) {
+    let mut group = c.benchmark_group("entry_id_ops");
+    let data = gen_data(1_000, 42);
+    let mut tree = new_tree();
+    let mut ids = Vec::with_capacity(data.len());
+    for (k, v) in &data {
+        ids.push(tree.insert(*k, v.clone()).unwrap());
+    }
+
+    group.bench_function("get_by_id", |b| {
+        b.iter(|| {
+            for id in &ids {
+                black_box(tree.get(*id));
+            }
+        })
+    });
+
+    group.bench_function("erase_by_id", |b| {
+        b.iter_batched(
+            || {
+                let mut t = new_tree();
+                let mut stored = Vec::new();
+                for (k, v) in &data[..200] {
+                    stored.push(t.insert(*k, v.clone()).unwrap());
+                }
+                (t, stored)
+            },
+            |(mut t, stored)| {
+                for id in stored {
+                    t.erase_by_id(id);
+                }
+                black_box(t.size())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
 
 criterion_group!(
     name = benches;
@@ -484,6 +523,7 @@ criterion_group!(
     bench_search_min_max,
     bench_knn_search,
     bench_erase,
+    bench_entry_id_ops,
     bench_point_insert,
     bench_point_range_search,
     bench_point_knn_search,

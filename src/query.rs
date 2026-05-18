@@ -200,7 +200,7 @@ where
                 while self.leaf_iterator < leaf_guard.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf_guard.children[self.leaf_iterator] {
                         let dist = match &self.distance_fn {
-                            Some(df) => df.distance(&obj_node.value.0, &self.needle),
+                            Some(df) => df.distance(&obj_node.key(), &self.needle),
                             None => break,
                         };
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
@@ -379,7 +379,7 @@ where
                 while self.leaf_iterator < leaf_guard.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf_guard.children[self.leaf_iterator] {
                         let dist = match &self.distance_fn {
-                            Some(df) => df.distance(&obj_node.value.0, &self.needle),
+                            Some(df) => df.distance(&obj_node.key(), &self.needle),
                             None => break,
                         };
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {

@@ -3,6 +3,7 @@
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
 pub mod distance;
+pub mod entry;
 pub mod node;
 pub mod query;
 pub mod placeholder_queue;
@@ -12,6 +13,7 @@ pub mod tree;
 #[cfg(test)]
 mod tests;
 
+pub use entry::{DuplicateKey, EntryId, UpdateKeyError};
 pub use tree::MTree;
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;

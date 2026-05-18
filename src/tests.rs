@@ -2,6 +2,7 @@
 mod tests {
     use crate::MTree;
     use crate::distance::Distance;
+    use crate::DuplicateKey;
     use std::collections::BTreeSet;
 
     /// Euklidische Distanz für (i64, i64) – implementiert clone_box für search/range_search
@@ -73,8 +74,8 @@ mod tests {
     #[test]
     fn test_basic_insert() {
         let mut tree = new_tree_i64();
-        tree.insert((1, 2), "test1".to_string());
-        tree.insert((3, 4), "test2".to_string());
+        tree.insert((1, 2), "test1".to_string()).unwrap();
+        tree.insert((3, 4), "test2".to_string()).unwrap();
         assert_eq!(tree.size(), 2);
     }
 
@@ -88,12 +89,12 @@ mod tests {
     #[test]
     fn test_range_search() {
         let mut tree = new_tree_i64();
-        tree.insert((0, 0), "origin".to_string());
-        tree.insert((1, 0), "right".to_string());
-        tree.insert((10, 10), "far".to_string());
+        tree.insert((0, 0), "origin".to_string()).unwrap();
+        tree.insert((1, 0), "right".to_string()).unwrap();
+        tree.insert((10, 10), "far".to_string()).unwrap();
         let results: Vec<_> = tree.range_search(&(0, 0), 2.0).collect();
         assert_eq!(results.len(), 2);
-        let keys: Vec<_> = results.iter().map(|(n, _)| n.value.0).collect();
+        let keys: Vec<_> = results.iter().map(|(n, _)| n.key()).collect();
         assert!(keys.contains(&(0, 0)));
         assert!(keys.contains(&(1, 0)));
         assert!(!keys.contains(&(10, 10)));
@@ -102,12 +103,12 @@ mod tests {
     #[test]
     fn test_search_min_max_radius() {
         let mut tree = new_tree_i64();
-        tree.insert((0, 0), "a".to_string());
-        tree.insert((1, 0), "b".to_string());
-        tree.insert((2, 0), "c".to_string());
+        tree.insert((0, 0), "a".to_string()).unwrap();
+        tree.insert((1, 0), "b".to_string()).unwrap();
+        tree.insert((2, 0), "c".to_string()).unwrap();
         let results: Vec<_> = tree.search(&(0, 0), 0.5, 1.5).collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.value.1, "b");
+        assert_eq!(results[0].0.payload(), "b");
     }
 
     #[test]
@@ -115,33 +116,33 @@ mod tests {
         let mut tree = new_tree_i64();
         let k1: (i64, i64) = (1, 2);
         let k2: (i64, i64) = (3, 4);
-        tree.insert(k1, "x".to_string());
-        tree.insert(k2, "y".to_string());
+        tree.insert(k1, "x".to_string()).unwrap();
+        tree.insert(k2, "y".to_string()).unwrap();
         assert_eq!(tree.size(), 2);
-        tree.erase(&k1);
+        assert!(tree.erase_by_key(&k1));
         assert_eq!(tree.size(), 1);
         let results: Vec<_> = tree.range_search(&(0, 0), 100.0).collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.value.1, "y");
+        assert_eq!(results[0].0.payload(), "y");
     }
 
     #[test]
     fn test_knn_search() {
         let mut tree = new_tree_i64();
-        tree.insert((0, 0), "origin".to_string());
-        tree.insert((1, 0), "one".to_string());
-        tree.insert((2, 0), "two".to_string());
-        tree.insert((3, 0), "three".to_string());
+        tree.insert((0, 0), "origin".to_string()).unwrap();
+        tree.insert((1, 0), "one".to_string()).unwrap();
+        tree.insert((2, 0), "two".to_string()).unwrap();
+        tree.insert((3, 0), "three".to_string()).unwrap();
         let knn = tree.knn_search(&(0, 0), 2);
         assert_eq!(knn.len(), 2);
-        assert_eq!(knn[0].0.value.1, "origin");
-        assert_eq!(knn[1].0.value.1, "one");
+        assert_eq!(knn[0].0.payload(), "origin");
+        assert_eq!(knn[1].0.payload(), "one");
     }
 
     #[test]
     fn test_clear() {
         let mut tree = new_tree_i64();
-        tree.insert((1, 2), "a".to_string());
+        tree.insert((1, 2), "a".to_string()).unwrap();
         tree.clear();
         assert!(tree.is_empty());
         assert_eq!(tree.size(), 0);
@@ -184,7 +185,7 @@ mod tests {
         let mut tree = new_tree_i64();
         let vec_data: Vec<_> = data.to_vec();
         for (k, v) in data {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         (tree, vec_data)
     }
@@ -199,7 +200,7 @@ mod tests {
             for radius in radii {
                 let mtree_results: Vec<_> = tree.range_search(&needle, radius).collect();
                 let naive_results = naive_range_search(&vec_data, &needle, radius);
-                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.value.0).collect();
+                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
                 let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
                 assert_eq!(
                     mtree_keys.len(),
@@ -223,7 +224,7 @@ mod tests {
             for (min_r, max_r) in ranges {
                 let mtree_results: Vec<_> = tree.search(&needle, min_r, max_r).collect();
                 let naive_results = naive_search_min_max(&vec_data, &needle, min_r, max_r);
-                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.value.0).collect();
+                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
                 let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
                 assert_eq!(mtree_keys.len(), naive_keys.len());
                 assert_eq!(mtree_keys, naive_keys);
@@ -251,7 +252,7 @@ mod tests {
                 for (i, ((node, dist), (key, _, naive_dist))) in
                     mtree_results.iter().zip(naive_results.iter()).enumerate()
                 {
-                    assert_eq!(node.value.0, *key, "needle={:?} k={} i={}", needle, k, i);
+                    assert_eq!(node.key(), *key, "needle={:?} k={} i={}", needle, k, i);
                     assert!(
                         (dist - naive_dist).abs() < 1e-9,
                         "needle={:?} k={} i={} dists {:?} vs {:?}",
@@ -272,17 +273,17 @@ mod tests {
         let data = [((1, 2), "x".to_string()), ((3, 4), "y".to_string())];
         let mut tree = new_tree_i64();
         for (k, v) in &data {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         let key = (1, 2);
-        tree.erase(&key);
+        tree.erase_by_key(&key);
         let vec_data: Vec<_> = data.iter().filter(|(k, _)| *k != key).cloned().collect();
         assert_eq!(tree.size(), vec_data.len());
         let needle = (0, 0);
         let radius = 100.0;
         let mtree_results: Vec<_> = tree.range_search(&needle, radius).collect();
         let naive_results = naive_range_search(&vec_data, &needle, radius);
-        let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.value.0).collect();
+        let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
         let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
         assert_eq!(mtree_keys, naive_keys);
     }
@@ -293,13 +294,13 @@ mod tests {
         let mut tree = new_tree_i64();
         let mut vec_data = Vec::new();
         for (i, (k, v)) in data.iter().enumerate() {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
             vec_data.push((*k, v.clone()));
             assert_eq!(tree.size(), i + 1);
             let needle = (0, 0);
             let mtree_results: Vec<_> = tree.range_search(&needle, 20.0).collect();
             let naive_results = naive_range_search(&vec_data, &needle, 20.0);
-            let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.value.0).collect();
+            let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
             let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
             assert_eq!(mtree_keys, naive_keys, "after insert {:?}", k);
         }
@@ -309,7 +310,7 @@ mod tests {
     fn test_clear_empties_everything() {
         let mut tree = new_tree_i64();
         for (k, v) in &test_data() {
-            tree.insert(*k, v.clone());
+            tree.insert(*k, v.clone()).unwrap();
         }
         tree.clear();
         assert!(tree.is_empty());
@@ -335,29 +336,22 @@ mod tests {
         let p2 = Point::new(vec![3.0, 4.0]);
         let p3 = Point::new(vec![5.0, 6.0]);
         
-        tree.insert(p1.clone(), "point1".to_string());
-        tree.insert(p2.clone(), "point2".to_string());
-        tree.insert(p3.clone(), "point3".to_string());
-        
+        tree.insert(p1.clone(), "point1".to_string()).unwrap();
+        tree.insert(p2.clone(), "point2".to_string()).unwrap();
+        tree.insert(p3.clone(), "point3".to_string()).unwrap();
+
         assert_eq!(tree.size(), 3);
-        
-        // Test range_search mit SIMD-optimierter Distanzberechnung
+
         let results: Vec<_> = tree.range_search(&Point::new(vec![1.5, 2.5]), 1.0).collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.value.1, "point1");
-        
-        // Test erase() - sollte funktionieren da Point Hash + Eq implementiert
-        // Hinweis: erase() könnte Probleme haben, daher testen wir primär die SIMD-Funktionalität
-        tree.erase(&p2);
-        
-        // Die SIMD-Funktionalität wird durch die range_search-Aufrufe getestet
-        // erase() wird aufgerufen, aber wir testen nicht streng ob es funktioniert,
-        // da dies ein bekanntes Problem mit Point sein könnte
-        
-        // p1 und p3 sollten noch vorhanden sein (SIMD-Test)
+        assert_eq!(results[0].0.payload(), "point1");
+
+        assert!(tree.erase_by_key(&p2));
+        assert_eq!(tree.size(), 2);
+
         let results: Vec<_> = tree.range_search(&Point::new(vec![1.5, 2.5]), 1.0).collect();
         assert_eq!(results.len(), 1);
-        
+
         let results: Vec<_> = tree.range_search(&Point::new(vec![5.5, 6.5]), 1.0).collect();
         assert_eq!(results.len(), 1);
     }
@@ -370,7 +364,7 @@ mod tests {
         for x in 0..5 {
             for y in 0..5 {
                 let p = Point::new(vec![x as f64, y as f64]);
-                tree.insert(p, format!("point_{}_{}", x, y));
+                tree.insert(p, format!("point_{}_{}", x, y)).unwrap();
             }
         }
         
@@ -391,5 +385,69 @@ mod tests {
         assert!(distances[0] < 0.2);
         // Alle Distanzen sollten endlich sein
         assert!(distances.iter().all(|d: &f64| d.is_finite()));
+    }
+
+    #[test]
+    fn test_entry_id_get() {
+        let mut tree = new_tree_i64();
+        let id = tree.insert((1, 2), "a".to_string()).unwrap();
+        let node = tree.get(id).unwrap();
+        assert_eq!(node.id, id);
+        assert_eq!(node.key(), (1, 2));
+        assert_eq!(node.payload(), "a");
+    }
+
+    #[test]
+    fn test_duplicate_insert() {
+        let mut tree = new_tree_i64();
+        tree.insert((1, 2), "a".to_string()).unwrap();
+        assert!(matches!(
+            tree.insert((1, 2), "b".to_string()),
+            Err(DuplicateKey)
+        ));
+    }
+
+    #[test]
+    fn test_erase_by_id() {
+        let mut tree = new_tree_i64();
+        let id1 = tree.insert((1, 2), "x".to_string()).unwrap();
+        tree.insert((3, 4), "y".to_string()).unwrap();
+        assert!(tree.erase_by_id(id1));
+        assert!(tree.get(id1).is_none());
+        assert_eq!(tree.size(), 1);
+    }
+
+    #[test]
+    fn test_slot_reuse() {
+        let mut tree = new_tree_i64();
+        let old_id = tree.insert((1, 2), "a".to_string()).unwrap();
+        assert!(tree.erase_by_id(old_id));
+        assert!(tree.get(old_id).is_none());
+        let new_id = tree.insert((9, 9), "b".to_string()).unwrap();
+        // Slot may be recycled — same EntryId, new payload
+        assert_eq!(new_id, old_id);
+        assert_eq!(tree.get(old_id).unwrap().payload(), "b");
+    }
+
+    #[test]
+    fn test_update_value() {
+        let mut tree = new_tree_i64();
+        let id = tree.insert((0, 0), "old".to_string()).unwrap();
+        assert!(tree.update_value(id, "new".to_string()));
+        assert_eq!(tree.get(id).unwrap().payload(), "new");
+        let knn = tree.knn_search(&(0, 0), 1);
+        assert_eq!(knn[0].0.payload(), "new");
+    }
+
+    #[test]
+    fn test_update_key_vs_naive() {
+        let mut tree = new_tree_i64();
+        let id = tree.insert((0, 0), "origin".to_string()).unwrap();
+        tree.update_key(id, (10, 10)).unwrap();
+        let results: Vec<_> = tree.range_search(&(10, 10), 0.5).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.key(), (10, 10));
+        let far: Vec<_> = tree.range_search(&(0, 0), 0.5).collect();
+        assert!(far.is_empty());
     }
 }

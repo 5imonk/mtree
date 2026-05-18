@@ -3,12 +3,13 @@
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
 use crate::distance::{Distance, EuclideanDistance};
+use crate::entry::{DuplicateKey, EntryId, UpdateKeyError};
 use crate::node::{NodePtr, ObjectNode, RoutingNode};
 use crate::placeholder_queue::PlaceholderQueue;
 use crate::query::{Query, RangeQuery};
 use crate::stats::{DescendantCounter, NodeStats};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
@@ -24,14 +25,17 @@ where
     max_node_size: usize,
     split_sampling: usize,
     root: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
-    entries: Vec<Arc<ObjectNode<K, V, S>>>,
+    by_id: Vec<Option<Arc<ObjectNode<K, V, S>>>>,
+    free_list: Vec<usize>,
+    key_index: HashMap<K, EntryId>,
+    entry_count: usize,
     distance_fn: Box<dyn Distance<K, Output = D> + Send + Sync>,
     root_mutex: Mutex<()>,
 }
 
 impl<K, V, D, S> Clone for MTree<K, V, D, S>
 where
-    K: Clone + Send + Sync,
+    K: Clone + Send + Sync + Hash + Eq,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
@@ -41,10 +45,13 @@ where
             min_node_size: self.min_node_size,
             max_node_size: self.max_node_size,
             split_sampling: self.split_sampling,
-            root: self.root.clone(),  // Arc wird geklont (shared ownership)
-            entries: self.entries.clone(),  // Vec und Arcs werden geklont
-            distance_fn: self.distance_fn.clone_box(),  // Distance-Funktion wird geklont
-            root_mutex: Mutex::new(()),  // Neuer Mutex für den Klon
+            root: self.root.clone(),
+            by_id: self.by_id.clone(),
+            free_list: self.free_list.clone(),
+            key_index: self.key_index.clone(),
+            entry_count: self.entry_count,
+            distance_fn: self.distance_fn.clone_box(),
+            root_mutex: Mutex::new(()),
         }
     }
 }
@@ -173,7 +180,10 @@ where
             max_node_size: 100,
             split_sampling: 20,
             root: None,
-            entries: Vec::new(),
+            by_id: Vec::new(),
+            free_list: Vec::new(),
+            key_index: HashMap::new(),
+            entry_count: 0,
             distance_fn: Box::new(distance_fn),
             root_mutex: Mutex::new(()),
         }
@@ -194,7 +204,10 @@ where
             max_node_size,
             split_sampling,
             root: None,
-            entries: Vec::new(),
+            by_id: Vec::new(),
+            free_list: Vec::new(),
+            key_index: HashMap::new(),
+            entry_count: 0,
             distance_fn: Box::new(distance_fn),
             root_mutex: Mutex::new(()),
         }
@@ -212,7 +225,10 @@ where
             max_node_size: 100,
             split_sampling: 20,
             root: None,
-            entries: Vec::new(),
+            by_id: Vec::new(),
+            free_list: Vec::new(),
+            key_index: HashMap::new(),
+            entry_count: 0,
             distance_fn: Box::new(EuclideanDistance),
             root_mutex: Mutex::new(()),
         }
@@ -230,7 +246,10 @@ where
             max_node_size: 100,
             split_sampling: 20,
             root: None,
-            entries: Vec::new(),
+            by_id: Vec::new(),
+            free_list: Vec::new(),
+            key_index: HashMap::new(),
+            entry_count: 0,
             distance_fn: Box::new(EuclideanDistance),
             root_mutex: Mutex::new(()),
         }
@@ -244,32 +263,61 @@ where
     D: DistanceType,
     S: NodeStats<K, V> + Default,
 {
-    /// Fügt einen Eintrag in den Baum ein
-    pub fn insert(&mut self, key: K, value: V) {
-        let _lock = self.root_mutex.lock().unwrap();
+    fn alloc_slot(&mut self) -> EntryId {
+        let index = if let Some(index) = self.free_list.pop() {
+            index
+        } else {
+            let index = self.by_id.len();
+            self.by_id.push(None);
+            index
+        };
+        EntryId::from_index(index)
+    }
 
-        let mut entry = Arc::new(ObjectNode::new(key.clone(), value));
+    fn release_slot(&mut self, id: EntryId) {
+        let index = id.index();
+        self.by_id[index] = None;
+        self.free_list.push(index);
+        self.entry_count -= 1;
+    }
+
+    /// Fügt einen Eintrag in den Baum ein.
+    pub fn insert(&mut self, key: K, value: V) -> Result<EntryId, DuplicateKey> {
+        if self.key_index.contains_key(&key) {
+            return Err(DuplicateKey);
+        }
+
+        let id = self.alloc_slot();
+        let entry = Arc::new(ObjectNode::new(id, key.clone(), value));
+
+        let _lock = self.root_mutex.lock().unwrap();
+        self.by_id[id.index()] = Some(entry.clone());
+        self.key_index.insert(key.clone(), id);
+        self.entry_count += 1;
 
         if let Some(root) = self.root.clone() {
-            let entry_clone = entry.clone();
-            self.entries.push(entry_clone);
-            drop(_lock); // Lock freigeben vor tree_insert
+            drop(_lock);
             self.tree_insert(entry, root);
         } else {
-            // Erstelle neuen Root; parent setzen, bevor entry irgendwo anders referenziert wird
             let new_root = RoutingNode::with_key(key.clone(), true);
             let root_arc = Arc::new(Mutex::new(new_root));
-            if let Some(entry_mut) = Arc::get_mut(&mut entry) {
-                entry_mut.parent = Some(root_arc.clone());
-                entry_mut.parent_distance = 0.0;
-            }
+            entry.set_parent(Some(root_arc.clone()), 0.0);
             {
                 let mut root_guard = root_arc.lock().unwrap();
-                root_guard.children.push(NodePtr::Object(entry.clone()));
+                let entry_value = entry.value.read().unwrap();
+                root_guard.stats.add_descendant(&*entry_value);
+                drop(entry_value);
+                root_guard.children.push(NodePtr::Object(entry));
             }
-            self.entries.push(entry);
             self.root = Some(root_arc);
         }
+
+        Ok(id)
+    }
+
+    /// Liefert den Eintrag zur stabilen ID (O(1)).
+    pub fn get(&self, id: EntryId) -> Option<&Arc<ObjectNode<K, V, S>>> {
+        self.by_id.get(id.index())?.as_ref()
     }
 
     fn tree_insert(
@@ -277,7 +325,7 @@ where
         entry: Arc<ObjectNode<K, V, S>>,
         node: Arc<Mutex<RoutingNode<K, V, S>>>,
     ) {
-        let key = entry.value.0.clone();
+        let key = entry.key();
         let mut current = node;
 
         loop {
@@ -293,7 +341,9 @@ where
                 // entry.parent wird später aktualisiert wenn möglich
 
                 // Stats aktualisieren
-                node_guard.stats.add_descendant(&entry.value);
+                let entry_value = entry.value.read().unwrap();
+                node_guard.stats.add_descendant(&*entry_value);
+                drop(entry_value);
 
                 // Covering-Radius aktualisieren wenn nötig
                 let distance_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
@@ -311,6 +361,8 @@ where
                 }
 
                 node_guard.children.push(NodePtr::Object(entry.clone()));
+
+                entry.set_parent(Some(current.clone()), distance_f64);
 
                 if node_guard.children.len() > self.max_node_size {
                     drop(node_guard);
@@ -407,8 +459,9 @@ where
 
             for child in &node.children {
                 if let NodePtr::Object(obj_node) = child {
-                    if obj_node.parent_distance > max_distance {
-                        max_distance = obj_node.parent_distance;
+                    let pd = obj_node.dist_to_parent();
+                    if pd > max_distance {
+                        max_distance = pd;
                         furthest = Some(obj_node.as_ref() as *const ObjectNode<K, V, S>);
                     }
                 }
@@ -471,9 +524,7 @@ where
             for child in &mut node1_guard.children {
                 match child {
                     NodePtr::Object(obj_node) => {
-                        if let Some(obj_mut) = Arc::get_mut(obj_node) {
-                            obj_mut.parent = Some(node1_arc.clone());
-                        }
+                        obj_node.set_parent(Some(node1_arc.clone()), obj_node.dist_to_parent());
                     }
                     NodePtr::Routing(routing_node) => {
                         let mut routing_guard = routing_node.lock().unwrap();
@@ -489,9 +540,7 @@ where
             for child in &mut node2_guard.children {
                 match child {
                     NodePtr::Object(obj_node) => {
-                        if let Some(obj_mut) = Arc::get_mut(obj_node) {
-                            obj_mut.parent = Some(node2_arc.clone());
-                        }
+                        obj_node.set_parent(Some(node2_arc.clone()), obj_node.dist_to_parent());
                     }
                     NodePtr::Routing(routing_node) => {
                         let mut routing_guard = routing_node.lock().unwrap();
@@ -617,12 +666,14 @@ where
             if node1.is_leaf {
                 for child in &node1.children {
                     if let NodePtr::Object(obj_node) = child {
-                        node1.stats.add_descendant(&obj_node.value);
+                        let v = obj_node.value.read().unwrap();
+                        node1.stats.add_descendant(&*v);
                     }
                 }
                 for child in &node2.children {
                     if let NodePtr::Object(obj_node) = child {
-                        node2.stats.add_descendant(&obj_node.value);
+                        let v = obj_node.value.read().unwrap();
+                        node2.stats.add_descendant(&*v);
                     }
                 }
             } else {
@@ -781,10 +832,7 @@ where
             // Setze parent_distance für das Kind
             match &mut node {
                 NodePtr::Object(obj_node) => {
-                    // Für ObjectNodes: parent_distance direkt setzen
-                    if let Some(obj_mut) = Arc::get_mut(obj_node) {
-                        obj_mut.parent_distance = parent_distance;
-                    }
+                    obj_node.set_parent(obj_node.parent(), parent_distance);
                 }
                 NodePtr::Routing(routing_node) => {
                     // Für RoutingNodes: über Mutex setzen
@@ -810,24 +858,109 @@ where
         }
     }
 
-    /// Entfernt einen Eintrag aus dem Baum
-    pub fn erase(&mut self, key: &K) {
-        let _lock = self.root_mutex.lock().unwrap();
+    /// Entfernt einen Eintrag anhand seiner stabilen ID.
+    pub fn erase_by_id(&mut self, id: EntryId) -> bool {
+        let entry = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
+            Some(e) => e.clone(),
+            None => return false,
+        };
+        let key = entry.key();
 
-        // Finde Eintrag in entries (key ist &K, vergleiche mit value.0)
-        let entry_pos = self.entries.iter().position(|entry| entry.value.0 == *key);
-        if let Some(pos) = entry_pos {
-            let entry = self.entries[pos].clone();
-            drop(_lock); // Lock freigeben vor tree_erase
-            self.tree_erase(entry);
-            let _lock2 = self.root_mutex.lock().unwrap();
-            self.entries.remove(pos);
+        self.tree_erase(entry);
+        self.key_index.remove(&key);
+        self.release_slot(id);
+        true
+    }
+
+    /// Entfernt einen Eintrag anhand seines Schlüssels (O(1) Lookup).
+    pub fn erase_by_key(&mut self, key: &K) -> bool {
+        let id = match self.key_index.get(key) {
+            Some(&id) => id,
+            None => return false,
+        };
+        self.erase_by_id(id)
+    }
+
+    /// Entfernt einen Eintrag anhand seines Schlüssels.
+    #[deprecated(note = "use erase_by_key instead")]
+    pub fn erase(&mut self, key: &K) -> bool {
+        self.erase_by_key(key)
+    }
+
+    /// Aktualisiert nur die Nutzdaten (O(1), Baum unverändert).
+    pub fn update_value(&mut self, id: EntryId, value: V) -> bool {
+        let slot = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
+            Some(arc) => arc,
+            None => return false,
+        };
+        slot.value.write().unwrap().1 = value;
+        true
+    }
+
+    /// Verschiebt den Eintrag im Metrikraum (erase + reinsert, gleiche EntryId).
+    pub fn update_key(&mut self, id: EntryId, new_key: K) -> Result<(), UpdateKeyError> {
+        let _lock = self.root_mutex.lock().unwrap();
+        let entry = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
+            Some(e) => e.clone(),
+            None => return Err(UpdateKeyError::NotFound),
+        };
+        let old_key = entry.key();
+
+        if new_key == old_key {
+            return Ok(());
         }
+
+        if let Some(&existing) = self.key_index.get(&new_key) {
+            if existing != id {
+                return Err(UpdateKeyError::DuplicateKey);
+            }
+        }
+
+        drop(_lock);
+
+        self.tree_erase(entry);
+
+        self.by_id
+            .get(id.index())
+            .and_then(|o| o.as_ref())
+            .ok_or(UpdateKeyError::NotFound)?
+            .value
+            .write()
+            .unwrap()
+            .0 = new_key.clone();
+
+        self.key_index.remove(&old_key);
+        self.key_index.insert(new_key, id);
+
+        let entry = self
+            .by_id
+            .get(id.index())
+            .and_then(|o| o.clone())
+            .ok_or(UpdateKeyError::NotFound)?;
+
+        if let Some(root) = self.root.clone() {
+            self.tree_insert(entry, root);
+        } else {
+            let key = entry.key();
+            let new_root = RoutingNode::with_key(key, true);
+            let root_arc = Arc::new(Mutex::new(new_root));
+            entry.set_parent(Some(root_arc.clone()), 0.0);
+            {
+                let mut root_guard = root_arc.lock().unwrap();
+                let entry_value = entry.value.read().unwrap();
+                root_guard.stats.add_descendant(&*entry_value);
+                drop(entry_value);
+                root_guard.children.push(NodePtr::Object(entry));
+            }
+            self.root = Some(root_arc);
+        }
+
+        Ok(())
     }
 
     fn tree_erase(&mut self, entry: Arc<ObjectNode<K, V, S>>) {
         // C++ Referenz: treeErase()
-        if let Some(ref parent_arc) = entry.parent {
+        if let Some(parent_arc) = entry.parent() {
             let mut parent_guard = parent_arc.lock().unwrap();
 
             // Entferne aus parent.children
@@ -840,7 +973,9 @@ where
             });
 
             // Aktualisiere Stats
-            parent_guard.stats.remove_descendant(&entry.value);
+            let entry_value = entry.value.read().unwrap();
+            parent_guard.stats.remove_descendant(&*entry_value);
+            drop(entry_value);
 
             // Prüfe ob furthest_descendant entfernt wurde
             let needs_radius_recompute =
@@ -1043,7 +1178,8 @@ where
             // Aktualisiere Stats
             if is_leaf {
                 if let NodePtr::Object(ref obj_node) = grandchild {
-                    from_guard.stats.remove_descendant(&obj_node.value);
+                    let v = obj_node.value.read().unwrap();
+                    from_guard.stats.remove_descendant(&*v);
                 }
             } else {
                 if let NodePtr::Routing(ref routing_node) = grandchild {
@@ -1072,7 +1208,8 @@ where
         if is_leaf {
             if let NodePtr::Object(ref obj_node) = grandchild {
                 let mut to_guard = to.lock().unwrap();
-                to_guard.stats.add_descendant(&obj_node.value);
+                let v = obj_node.value.read().unwrap();
+                to_guard.stats.add_descendant(&*v);
                 drop(to_guard);
             }
         } else {
@@ -1222,7 +1359,8 @@ where
                 // Für Blattknoten: zähle ObjectNodes
                 for child in &from_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
-                        to_guard.stats.add_descendant(&obj_node.value);
+                        let v = obj_node.value.read().unwrap();
+                to_guard.stats.add_descendant(&*v);
                     }
                 }
             } else {
@@ -1258,17 +1396,20 @@ where
     /// Leert den Baum
     pub fn clear(&mut self) {
         self.root = None;
-        self.entries.clear();
+        self.by_id.clear();
+        self.free_list.clear();
+        self.key_index.clear();
+        self.entry_count = 0;
     }
 
     /// Anzahl der Einträge
     pub fn size(&self) -> usize {
-        self.entries.len()
+        self.entry_count
     }
 
     /// Prüft ob der Baum leer ist
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entry_count == 0
     }
 
     /// Bereichssuche
@@ -1379,7 +1520,8 @@ where
             if node_guard.is_leaf {
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
-                        let dist_d: D = distance_fn.distance(&obj_node.value.0, needle);
+                        let obj_key = obj_node.key();
+                        let dist_d: D = distance_fn.distance(&obj_key, needle);
                         let dist = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
                             && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
                         {
