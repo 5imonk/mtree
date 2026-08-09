@@ -48,7 +48,7 @@ mod tests {
         data.iter()
             .filter(|(k, _)| {
                 let d = dist.distance(k, needle);
-                d >= min_radius && d <= max_radius
+                d >= min_radius && d < max_radius
             })
             .cloned()
             .collect()
@@ -619,5 +619,72 @@ mod tests {
             .collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.payload(), "active:c");
+    }
+
+    #[test]
+    fn test_knn_search_range_annulus_bounds() {
+        let mut tree = new_tree_i64();
+        // Distances from (0,0): 0, 1, 2, 3, 4
+        tree.insert((0, 0), "d0".to_string()).unwrap();
+        tree.insert((1, 0), "d1".to_string()).unwrap();
+        tree.insert((2, 0), "d2".to_string()).unwrap();
+        tree.insert((3, 0), "d3".to_string()).unwrap();
+        tree.insert((4, 0), "d4".to_string()).unwrap();
+
+        // min ≤ dist < max: 1 ≤ d < 3 → d1, d2 (d3 bei max ausgeschlossen)
+        let hits = tree.knn_search_range(&(0, 0), 10, 1.0, 3.0);
+        let payloads: Vec<_> = hits.iter().map(|(n, _)| n.payload()).collect();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(payloads, vec!["d1".to_string(), "d2".to_string()]);
+
+        // k begrenzt
+        let top1 = tree.knn_search_range(&(0, 0), 1, 1.0, 3.0);
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].0.payload(), "d1");
+
+        // dist == max_radius ausgeschlossen; dist == min_radius eingeschlossen
+        let band = tree.knn_search_range(&(0, 0), 5, 2.0, 4.0);
+        let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
+        assert!(keys.contains(&(2, 0)));
+        assert!(keys.contains(&(3, 0)));
+        assert!(!keys.contains(&(4, 0)));
+    }
+
+    #[test]
+    fn test_knn_search_range_fewer_than_k() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "a".to_string()).unwrap();
+        tree.insert((5, 0), "b".to_string()).unwrap();
+        // 0 ≤ d < 10 → a und b
+        let hits = tree.knn_search_range(&(0, 0), 5, 0.0, 10.0);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0.payload(), "a");
+        assert_eq!(hits[1].0.payload(), "b");
+    }
+
+    #[test]
+    fn test_knn_search_range_filtered() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "active:a".to_string()).unwrap();
+        tree.insert((1, 0), "inactive:b".to_string()).unwrap();
+        tree.insert((2, 0), "active:c".to_string()).unwrap();
+        tree.insert((3, 0), "inactive:d".to_string()).unwrap();
+        tree.insert((4, 0), "active:e".to_string()).unwrap();
+
+        let is_active = |_id, v: &String| v.starts_with("active:");
+
+        // 0.5 ≤ d < 4: b(1), c(2), d(3); e(4) ausgeschlossen. Aktive: c
+        let only = tree.knn_search_range_filtered(&(0, 0), 2, 0.5, 4.0, is_active, false);
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].0.payload(), "active:c");
+
+        let with_inactive =
+            tree.knn_search_range_filtered(&(0, 0), 2, 0.5, 4.0, is_active, true);
+        let payloads: Vec<_> = with_inactive.iter().map(|(n, _)| n.payload()).collect();
+        assert!(payloads.contains(&"inactive:b".to_string()));
+        assert!(payloads.contains(&"active:c".to_string()));
+        assert!(payloads.contains(&"inactive:d".to_string()));
+        assert!(!payloads.contains(&"active:e".to_string()));
+        assert!(!payloads.contains(&"active:a".to_string()));
     }
 }
