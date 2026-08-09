@@ -4,9 +4,11 @@
 
 pub mod distance;
 pub mod entry;
+pub mod filtered;
 pub mod node;
 pub mod query;
 pub mod placeholder_queue;
+mod search;
 pub mod stats;
 pub mod tree;
 
@@ -14,6 +16,7 @@ pub mod tree;
 mod tests;
 
 pub use entry::{DuplicateKey, EntryId, UpdateKeyError};
+pub use filtered::{FilteredQuery, FilteredRangeQuery};
 pub use tree::MTree;
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;

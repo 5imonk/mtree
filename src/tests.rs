@@ -476,4 +476,148 @@ mod tests {
         let far: Vec<_> = tree.range_search(&(0, 0), 0.5).collect();
         assert!(far.is_empty());
     }
+
+    #[test]
+    fn test_knn_search_filtered_by_value() {
+        let mut tree = new_tree_i64();
+        // Distances from (0,0): 0, 1, 2, 3 — mark "one" and "three" inactive via payload prefix
+        tree.insert((0, 0), "active:origin".to_string()).unwrap();
+        tree.insert((1, 0), "inactive:one".to_string()).unwrap();
+        tree.insert((2, 0), "active:two".to_string()).unwrap();
+        tree.insert((3, 0), "inactive:three".to_string()).unwrap();
+        tree.insert((4, 0), "active:four".to_string()).unwrap();
+
+        let is_active = |_id, v: &String| v.starts_with("active:");
+
+        // k=2 Aktive, nur Aktive
+        let only_active = tree.knn_search_filtered(&(0, 0), 2, is_active, false);
+        assert_eq!(only_active.len(), 2);
+        assert_eq!(only_active[0].0.payload(), "active:origin");
+        assert_eq!(only_active[1].0.payload(), "active:two");
+
+        // k=2 Aktive, inkl. Inaktive innerhalb des Radius (Distanz des 2. Aktiven = 2)
+        let with_inactive = tree.knn_search_filtered(&(0, 0), 2, is_active, true);
+        let payloads: Vec<_> = with_inactive.iter().map(|(n, _)| n.payload()).collect();
+        assert!(payloads.contains(&"active:origin".to_string()));
+        assert!(payloads.contains(&"inactive:one".to_string()));
+        assert!(payloads.contains(&"active:two".to_string()));
+        assert!(!payloads.contains(&"inactive:three".to_string()));
+        assert!(!payloads.contains(&"active:four".to_string()));
+    }
+
+    #[test]
+    fn test_knn_search_filtered_by_entry_id() {
+        let mut tree = new_tree_i64();
+        let id0 = tree.insert((0, 0), "origin".to_string()).unwrap();
+        let _id1 = tree.insert((1, 0), "one".to_string()).unwrap();
+        let id2 = tree.insert((2, 0), "two".to_string()).unwrap();
+        let _id3 = tree.insert((3, 0), "three".to_string()).unwrap();
+        let id4 = tree.insert((4, 0), "four".to_string()).unwrap();
+
+        let active_ids = [id0, id2, id4];
+        let is_active = |id, _v: &String| active_ids.contains(&id);
+
+        let hits = tree.knn_search_filtered(&(0, 0), 2, is_active, false);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0.id, id0);
+        assert_eq!(hits[1].0.id, id2);
+
+        let with_inactive = tree.knn_search_filtered(&(0, 0), 2, is_active, true);
+        let ids: Vec<_> = with_inactive.iter().map(|(n, _)| n.id).collect();
+        assert!(ids.contains(&id0));
+        assert!(ids.contains(&_id1));
+        assert!(ids.contains(&id2));
+        assert!(!ids.contains(&_id3));
+    }
+
+    #[test]
+    fn test_knn_search_filtered_skips_nearby_inactive() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "off".to_string()).unwrap();
+        tree.insert((1, 0), "off".to_string()).unwrap();
+        tree.insert((2, 0), "on".to_string()).unwrap();
+        tree.insert((3, 0), "on".to_string()).unwrap();
+
+        let hits = tree.knn_search_filtered(&(0, 0), 2, |_id, v: &String| v == "on", false);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0.payload(), "on");
+        assert_eq!(hits[0].0.key(), (2, 0));
+        assert_eq!(hits[1].0.payload(), "on");
+        assert_eq!(hits[1].0.key(), (3, 0));
+    }
+
+    #[test]
+    fn test_knn_search_filtered_edge_cases() {
+        let mut tree = new_tree_i64();
+        assert!(tree
+            .knn_search_filtered(&(0, 0), 1, |_, _: &String| true, false)
+            .is_empty());
+
+        tree.insert((0, 0), "a".to_string()).unwrap();
+        tree.insert((1, 0), "b".to_string()).unwrap();
+
+        assert!(tree
+            .knn_search_filtered(&(0, 0), 0, |_, _: &String| true, false)
+            .is_empty());
+
+        // Weniger Aktive als k
+        let hits = tree.knn_search_filtered(&(0, 0), 5, |_id, v: &String| v == "a", false);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.payload(), "a");
+
+        let with_inactive = tree.knn_search_filtered(&(0, 0), 5, |_id, v: &String| v == "a", true);
+        assert_eq!(with_inactive.len(), 2);
+    }
+
+    #[test]
+    fn test_range_search_filtered_by_value() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "active:origin".to_string()).unwrap();
+        tree.insert((1, 0), "inactive:one".to_string()).unwrap();
+        tree.insert((2, 0), "active:two".to_string()).unwrap();
+        tree.insert((10, 0), "active:far".to_string()).unwrap();
+
+        let results: Vec<_> = tree
+            .range_search_filtered(&(0, 0), 3.0, |_id, v: &String| v.starts_with("active:"))
+            .collect();
+        let payloads: Vec<_> = results.iter().map(|(n, _)| n.payload()).collect();
+        assert_eq!(results.len(), 2);
+        assert!(payloads.contains(&"active:origin".to_string()));
+        assert!(payloads.contains(&"active:two".to_string()));
+        assert!(!payloads.contains(&"inactive:one".to_string()));
+        assert!(!payloads.contains(&"active:far".to_string()));
+    }
+
+    #[test]
+    fn test_range_search_filtered_by_entry_id() {
+        let mut tree = new_tree_i64();
+        let id0 = tree.insert((0, 0), "origin".to_string()).unwrap();
+        let _id1 = tree.insert((1, 0), "one".to_string()).unwrap();
+        let id2 = tree.insert((2, 0), "two".to_string()).unwrap();
+
+        let active = [id0, id2];
+        let results: Vec<_> = tree
+            .range_search_filtered(&(0, 0), 5.0, |id, _: &String| active.contains(&id))
+            .collect();
+        let ids: Vec<_> = results.iter().map(|(n, _)| n.id).collect();
+        assert_eq!(results.len(), 2);
+        assert!(ids.contains(&id0));
+        assert!(ids.contains(&id2));
+        assert!(!ids.contains(&_id1));
+    }
+
+    #[test]
+    fn test_search_filtered_annulus() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "active:a".to_string()).unwrap();
+        tree.insert((1, 0), "inactive:b".to_string()).unwrap();
+        tree.insert((2, 0), "active:c".to_string()).unwrap();
+        tree.insert((3, 0), "active:d".to_string()).unwrap();
+
+        let results: Vec<_> = tree
+            .search_filtered(&(0, 0), 0.5, 2.5, |_id, v: &String| v.starts_with("active:"))
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.payload(), "active:c");
+    }
 }
