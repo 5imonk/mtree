@@ -2,10 +2,9 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-//! Gefilterte Such-APIs für [`MTree`](crate::tree::MTree).
+//! Interne gefilterte k-NN-Helfer für [`MTree`](crate::tree::MTree).
 
 use crate::entry::EntryId;
-use crate::filtered::query::{FilteredQuery, FilteredRangeQuery};
 use crate::node::{NodePtr, ObjectNode};
 use crate::stats::NodeStats;
 use crate::tree::{
@@ -33,49 +32,14 @@ where
     D: DistanceType,
     S: NodeStats<K, V> + Default,
 {
-    /// Radius-Suche, die nur aktive Einträge liefert (`is_active(id, value)`).
-    pub fn range_search_filtered<F>(
-        &self,
-        needle: &K,
-        radius: D,
-        is_active: F,
-    ) -> FilteredRangeQuery<K, V, D, S, F>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
-        FilteredRangeQuery::new(self.range_search(needle, radius), is_active)
-    }
-
-    /// Bereichssuche (Annulus), die nur aktive Einträge liefert (`min ≤ dist < max`).
-    pub fn search_filtered<F>(
-        &self,
-        needle: &K,
-        min_radius: D,
-        max_radius: D,
-        is_active: F,
-    ) -> FilteredQuery<K, V, D, S, F>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
-        FilteredQuery::new(self.search(needle, min_radius, max_radius), is_active)
-    }
-
     /// k-NN mit Predicate: sucht bis `k` aktive Treffer gefunden sind.
-    ///
-    /// `is_active(id, value)` entscheidet, ob ein Eintrag aktiv ist.
-    /// `include_inactive`: wenn `true`, enthält das Ergebnis auch inaktive Punkte
-    /// innerhalb der Distanz des k-ten aktiven Nachbarn; sonst nur die (bis zu) `k`
-    /// nächsten Aktiven.
-    pub fn knn_search_filtered<F>(
+    pub(crate) fn knn_search_filtered(
         &self,
         needle: &K,
         k: usize,
-        is_active: F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
         }
@@ -85,7 +49,7 @@ where
             let results_f64 = self.knn_search_filtered_with_placeholder_queue(
                 needle,
                 k,
-                &is_active,
+                is_active,
                 include_inactive,
             );
             return results_f64
@@ -97,16 +61,13 @@ where
     }
 
     /// Gefilterte k-NN: nur aktive Objekte zählen für k und den Pruning-Radius.
-    fn knn_search_filtered_with_placeholder_queue<F>(
+    fn knn_search_filtered_with_placeholder_queue(
         &self,
         needle: &K,
         k: usize,
-        is_active: &F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
 
@@ -247,34 +208,19 @@ where
     }
 
     /// Fallback für nicht-f64 Distanztypen: alles sammeln, sortieren, filtern.
-    fn knn_search_filtered_fallback<F>(
+    fn knn_search_filtered_fallback(
         &self,
         needle: &K,
         k: usize,
-        is_active: F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
-        let mut all: Vec<_> = self.range_search(needle, max_radius).collect();
+        let mut all: Vec<_> = self.query_ball(needle, max_radius).collect();
         all.sort_by(|a, b| {
-            let da = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy::<D, f64>(&a.1) }
-            } else {
-                0.0
-            };
-            let db = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy::<D, f64>(&b.1) }
-            } else {
-                0.0
-            };
-            da.partial_cmp(&db).unwrap_or(Ordering::Equal)
+            dist_as_f64(a.1)
+                .partial_cmp(&dist_as_f64(b.1))
+                .unwrap_or(Ordering::Equal)
         });
 
         let mut out = Vec::new();
@@ -283,21 +229,7 @@ where
 
         for (node, dist) in all {
             if let Some(radius) = kth_active_dist {
-                let radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                    && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                {
-                    unsafe { std::mem::transmute_copy::<D, f64>(&radius) }
-                } else {
-                    f64::INFINITY
-                };
-                let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                    && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                {
-                    unsafe { std::mem::transmute_copy::<D, f64>(&dist) }
-                } else {
-                    0.0
-                };
-                if dist_f64 > radius_f64 * UPPER_BOUND_FACTOR {
+                if dist_as_f64(dist) > dist_as_f64(radius) * UPPER_BOUND_FACTOR {
                     break;
                 }
             }
@@ -329,18 +261,15 @@ where
     }
 
     /// k-NN im Annulus mit Predicate: `min_radius ≤ dist < max_radius`, bis `k` Aktive.
-    pub fn knn_search_range_filtered<F>(
+    pub(crate) fn knn_search_range_filtered(
         &self,
         needle: &K,
         k: usize,
         min_radius: D,
         max_radius: D,
-        is_active: F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
         }
@@ -352,7 +281,7 @@ where
                 k,
                 min_radius,
                 max_radius,
-                &is_active,
+                is_active,
                 include_inactive,
             );
             return results_f64
@@ -370,18 +299,15 @@ where
         )
     }
 
-    fn knn_search_range_filtered_with_queue<F>(
+    fn knn_search_range_filtered_with_queue(
         &self,
         needle: &K,
         k: usize,
         min_radius: D,
         max_radius: D,
-        is_active: &F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
         if !(min_r < max_r) {
@@ -519,25 +445,22 @@ where
         }
     }
 
-    fn knn_search_range_filtered_fallback<F>(
+    fn knn_search_range_filtered_fallback(
         &self,
         needle: &K,
         k: usize,
         min_radius: D,
         max_radius: D,
-        is_active: F,
+        is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)>
-    where
-        F: Fn(EntryId, &V) -> bool,
-    {
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
         if !(min_r < max_r) {
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self.search(needle, min_radius, max_radius).collect();
+        let mut all: Vec<_> = self.query_annulus(needle, min_radius, max_radius).collect();
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);
             dist >= min_r && dist < max_r

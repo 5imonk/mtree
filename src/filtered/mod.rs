@@ -2,7 +2,7 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-//! Gefilterte Query-Iteratoren und Such-APIs.
+//! Gefilterte Query-Iteratoren.
 
 pub mod query;
 mod search;

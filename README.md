@@ -7,7 +7,7 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 - **SIMD-optimierte Distanzberechnungen**: Nutzt portable-simd für vektorisierte euklidische Distanzen
 - **Parallele Suche**: Rayon-Integration für parallele Traversierung
 - **Thread-sicher**: Arc<Mutex<>> für sichere parallele Operationen
-- **Effiziente Suchoperationen**: Range-Suche, k-NN-Suche, Nearest-Neighbor
+- **Einheitliche Such-API**: `knn_search` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 
 ## Begriffe
@@ -46,13 +46,57 @@ for node in tree.iter() {
     let _ = (node.key(), node.payload());
 }
 
-// Metrische Suche
-let nearby = tree.knn_search(&(1, 2), 5);
+// Metrische Suche — siehe Abschnitt unten
+let nearby = tree.knn_search(&(1, 2), 5, ());
 
 // Löschen per ID oder Schlüssel
 tree.erase_by_id(id);
 tree.erase_by_key(&(3, 4));
 ```
+
+### Suche
+
+Drei öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radiusgrenzen:
+
+| Methode | Bedeutung |
+|---------|-----------|
+| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`) |
+| `search` | Annulus `min_radius ≤ dist < max_radius` (`SearchConfig` Pflicht) |
+| `range_search` | Kugel `dist ≤ radius` (`RangeSearchConfig` Pflicht) |
+
+```rust
+use mtree::{KnnConfig, RangeSearchConfig, SearchConfig};
+
+// Plain k-NN
+let nearby = tree.knn_search(&(1, 2), 5, ());
+
+// k-NN mit Filter und Annulus
+let hits = tree.knn_search(
+    &(1, 2),
+    10,
+    KnnConfig::new()
+        .min_radius(1.0)
+        .max_radius(5.0)
+        .with_active(|_id, v: &String| v.starts_with("Raum"))
+        .include_inactive(false),
+);
+
+// Annulus-Iterator
+let band: Vec<_> = tree
+    .search(&(1, 2), SearchConfig::new(1.0, 5.0))
+    .collect();
+
+// Kugel, optional gefiltert
+let in_ball: Vec<_> = tree
+    .range_search(
+        &(1, 2),
+        RangeSearchConfig::new(3.0).with_active(|_id, v: &String| !v.is_empty()),
+    )
+    .collect();
+```
+
+- **`include_inactive`** gilt nur für k-NN: bei gesetztem Filter zählen nur aktive Treffer für `k`; inaktive innerhalb der Distanz des k-ten Aktiven können mitgeliefert werden.
+- Bei `search` / `range_search` bedeutet `is_active: None` (Default) „alle Treffer“, `Some(f)` nur aktive.
 
 ### Key und Value per `EntryId`
 

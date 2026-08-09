@@ -2,11 +2,16 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-//! Ungefilterte Such-APIs für [`MTree`](crate::tree::MTree).
+//! Such-APIs für [`MTree`](crate::tree::MTree).
 
+use crate::entry::EntryId;
+use crate::filtered::query::{FilteredQuery, FilteredRangeQuery};
 use crate::node::{NodePtr, ObjectNode};
 use crate::placeholder_queue::PlaceholderQueue;
 use crate::query::{Query, RangeQuery};
+use crate::search_config::{
+    IntoKnnConfig, IntoRangeSearchConfig, IntoSearchConfig, KnnConfigResolved,
+};
 use crate::stats::NodeStats;
 use crate::tree::{
     DistanceType, KnnDistanceKey, KnnQueueEntry, KnnTag, MTree, LOWER_BOUND_FACTOR,
@@ -34,8 +39,13 @@ where
     D: DistanceType,
     S: NodeStats<K, V> + Default,
 {
-    /// Bereichssuche (Annulus): Punkte mit `min_radius ≤ dist < max_radius`.
-    pub fn search(&self, needle: &K, min_radius: D, max_radius: D) -> Query<K, V, D, S> {
+    /// Interne Annulus-Query (`min ≤ dist < max`), ohne Filter.
+    pub(crate) fn query_annulus(
+        &self,
+        needle: &K,
+        min_radius: D,
+        max_radius: D,
+    ) -> Query<K, V, D, S> {
         if let Some(ref root) = self.root {
             Query::new(
                 needle.clone(),
@@ -49,8 +59,8 @@ where
         }
     }
 
-    /// Radius-Suche
-    pub fn range_search(&self, needle: &K, radius: D) -> RangeQuery<K, V, D, S> {
+    /// Interne Kugel-Query (`dist ≤ radius`), ohne Filter.
+    pub(crate) fn query_ball(&self, needle: &K, radius: D) -> RangeQuery<K, V, D, S> {
         if let Some(ref root) = self.root {
             RangeQuery::new(
                 needle.clone(),
@@ -63,8 +73,79 @@ where
         }
     }
 
-    /// k-Nearest-Neighbor Suche (PlaceholderQueue + Pruning für D=f64, sonst Fallback)
-    pub fn knn_search(&self, needle: &K, k: usize) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
+    /// Bereichssuche (Annulus): `min_radius ≤ dist < max_radius`, optional gefiltert.
+    pub fn search<'a>(
+        &'a self,
+        needle: &K,
+        config: impl IntoSearchConfig<'a, D, V>,
+    ) -> FilteredQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+        let cfg = config.into_search_config();
+        let inner = self.query_annulus(needle, cfg.min_radius, cfg.max_radius);
+        let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
+            cfg.is_active.unwrap_or_else(|| Box::new(|_, _| true));
+        FilteredQuery::new(inner, pred)
+    }
+
+    /// Radius-Suche (Kugel `dist ≤ radius`), optional gefiltert.
+    pub fn range_search<'a>(
+        &'a self,
+        needle: &K,
+        config: impl IntoRangeSearchConfig<'a, D, V>,
+    ) -> FilteredRangeQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+        let cfg = config.into_range_search_config();
+        let inner = self.query_ball(needle, cfg.radius);
+        let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
+            cfg.is_active.unwrap_or_else(|| Box::new(|_, _| true));
+        FilteredRangeQuery::new(inner, pred)
+    }
+
+    /// k-Nearest-Neighbor-Suche.
+    ///
+    /// `config` kann `()`, `None` oder [`KnnConfig`](crate::search_config::KnnConfig) sein:
+    /// optional Filter, `include_inactive`, sowie Annulus `min_radius`/`max_radius`.
+    pub fn knn_search<'a>(
+        &'a self,
+        needle: &K,
+        k: usize,
+        config: impl IntoKnnConfig<'a, D, V>,
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
+        let cfg = config.into_knn_config();
+        self.knn_search_dispatch(needle, k, cfg)
+    }
+
+    fn knn_search_dispatch(
+        &self,
+        needle: &K,
+        k: usize,
+        cfg: KnnConfigResolved<'_, D, V>,
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
+        let has_annulus = cfg.min_radius.is_some() || cfg.max_radius.is_some();
+        let min_r = cfg.min_radius.unwrap_or_else(D::zero);
+        let max_r = cfg.max_radius.unwrap_or_else(D::infinity);
+
+        match (has_annulus, cfg.is_active) {
+            (false, None) => self.knn_search_plain(needle, k),
+            (false, Some(active)) => {
+                self.knn_search_filtered(needle, k, active.as_ref(), cfg.include_inactive)
+            }
+            (true, None) => self.knn_search_range(needle, k, min_r, max_r),
+            (true, Some(active)) => self.knn_search_range_filtered(
+                needle,
+                k,
+                min_r,
+                max_r,
+                active.as_ref(),
+                cfg.include_inactive,
+            ),
+        }
+    }
+
+    /// Plain k-NN (PlaceholderQueue + Pruning für D=f64, sonst Fallback)
+    pub(crate) fn knn_search_plain(
+        &self,
+        needle: &K,
+        k: usize,
+    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
         }
@@ -77,7 +158,7 @@ where
                 .map(|(arc, d)| (arc, unsafe { std::mem::transmute_copy(&d) }))
                 .collect();
         }
-        return self.knn_search_fallback(needle, k);
+        self.knn_search_fallback(needle, k)
     }
 
     /// k-NN mit PlaceholderQueue und dynamischem Pruning (intern, D als f64 verwendet)
@@ -185,29 +266,17 @@ where
     /// Fallback für nicht-f64 Distanztypen: alles sammeln, sortieren, filtern.
     fn knn_search_fallback(&self, needle: &K, k: usize) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
-        let mut results: Vec<_> = self.range_search(needle, max_radius).collect();
+        let mut results: Vec<_> = self.query_ball(needle, max_radius).collect();
         results.sort_by(|a, b| {
-            let da = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy(&a.1) }
-            } else {
-                0.0
-            };
-            let db = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy(&b.1) }
-            } else {
-                0.0
-            };
+            let da = dist_as_f64(a.1);
+            let db = dist_as_f64(b.1);
             da.partial_cmp(&db).unwrap_or(Ordering::Equal)
         });
         results.into_iter().take(k).collect()
     }
 
     /// k-NN im Annulus: die k nächsten Punkte mit `min_radius ≤ dist < max_radius`.
-    pub fn knn_search_range(
+    pub(crate) fn knn_search_range(
         &self,
         needle: &K,
         k: usize,
@@ -362,7 +431,7 @@ where
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self.search(needle, min_radius, max_radius).collect();
+        let mut all: Vec<_> = self.query_annulus(needle, min_radius, max_radius).collect();
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);
             dist >= min_r && dist < max_r

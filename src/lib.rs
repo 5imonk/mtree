@@ -9,6 +9,7 @@ pub mod node;
 pub mod query;
 pub mod placeholder_queue;
 mod search;
+pub mod search_config;
 pub mod stats;
 pub mod tree;
 
@@ -17,6 +18,7 @@ mod tests;
 
 pub use entry::{DuplicateKey, EntryId, UpdateKeyError};
 pub use filtered::{FilteredQuery, FilteredRangeQuery};
+pub use search_config::{KnnConfig, RangeSearchConfig, SearchConfig};
 pub use tree::MTree;
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;
