@@ -3,7 +3,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use mtree::distance::{Distance, EuclideanDistance, Point};
-use mtree::MTree;
+use mtree::{MTree, RangeSearchConfig, SearchConfig};
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -136,7 +136,9 @@ fn bench_range_search(c: &mut Criterion) {
             |b, (tree, needle, radius)| {
                 b.iter(|| {
                     let t = tree.lock().unwrap();
-                    let r: Vec<_> = t.range_search(needle, *radius).collect();
+                    let r: Vec<_> = t
+                        .range_search(needle, RangeSearchConfig::new(*radius))
+                        .collect();
                     black_box(r)
                 })
             },
@@ -173,7 +175,9 @@ fn bench_search_min_max(c: &mut Criterion) {
             |b, (tree, needle, min_r, max_r)| {
                 b.iter(|| {
                     let t = tree.lock().unwrap();
-                    let r: Vec<_> = t.search(needle, *min_r, *max_r).collect();
+                    let r: Vec<_> = t
+                        .search(needle, SearchConfig::new(*min_r, *max_r))
+                        .collect();
                     black_box(r)
                 })
             },
@@ -207,7 +211,7 @@ fn bench_knn_search(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("mtree", n), &(), |b, _| {
             b.iter(|| {
                 let t = tree_clone.lock().unwrap();
-                let r = t.knn_search(&needle, k);
+                let r = t.knn_search(&needle, k, ());
                 black_box(r)
             })
         });
@@ -378,7 +382,9 @@ fn bench_point_range_search(c: &mut Criterion) {
             |b, (tree, needle, radius)| {
                 b.iter(|| {
                     let t = tree.lock().unwrap();
-                    let r: Vec<_> = t.range_search(needle, *radius).collect();
+                    let r: Vec<_> = t
+                        .range_search(needle, RangeSearchConfig::new(*radius))
+                        .collect();
                     black_box(r)
                 })
             },
@@ -419,7 +425,7 @@ fn bench_point_knn_search(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("point_simd", n), &(), |b, _| {
             b.iter(|| {
                 let t = point_tree_clone.lock().unwrap();
-                let r = t.knn_search(&point_needle, k);
+                let r = t.knn_search(&point_needle, k, ());
                 black_box(r)
             })
         });
