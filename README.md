@@ -7,7 +7,7 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 - **SIMD-optimierte Distanzberechnungen**: Nutzt portable-simd für vektorisierte euklidische Distanzen
 - **Parallele Suche**: Rayon-Integration für parallele Traversierung
 - **Thread-sicher**: Arc<Mutex<>> für sichere parallele Operationen
-- **Einheitliche Such-API**: `knn_search` / `search` / `range_search` mit optionalem Filter und Annulus-Config
+- **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 
 ## Begriffe
@@ -56,11 +56,12 @@ tree.erase_by_key(&(3, 4));
 
 ### Suche
 
-Drei öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radiusgrenzen:
+Vier öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radiusgrenzen:
 
 | Methode | Bedeutung |
 |---------|-----------|
 | `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`) |
+| `knn_from_entry` | k-NN von einem gespeicherten `EntryId`; `include_self` steuert, ob der Punkt selbst zählt |
 | `search` | Annulus `min_radius ≤ dist < max_radius` (`SearchConfig` Pflicht) |
 | `range_search` | Kugel `dist ≤ radius` (`RangeSearchConfig` Pflicht) |
 
@@ -69,6 +70,9 @@ use mtree::{KnnConfig, RangeSearchConfig, SearchConfig};
 
 // Plain k-NN
 let nearby = tree.knn_search(&(1, 2), 5, ());
+
+// k-NN von einem Eintrag im Baum (optional ohne den Punkt selbst)
+let neighbors = tree.knn_from_entry(id, 5, false, ()).unwrap();
 
 // k-NN mit Filter und Annulus
 let hits = tree.knn_search(

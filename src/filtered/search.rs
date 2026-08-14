@@ -6,10 +6,12 @@
 
 use crate::entry::EntryId;
 use crate::node::{NodePtr, ObjectNode};
+use crate::search::{is_seeded_leaf, visit_seeded_leaf_objects, KnnFromEntry};
 use crate::stats::NodeStats;
 use crate::tree::{
     DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR, UPPER_BOUND_FACTOR,
 };
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::hash::Hash;
@@ -22,6 +24,43 @@ fn dist_as_f64<D: DistanceType>(d: D) -> f64 {
         unsafe { std::mem::transmute_copy(&d) }
     } else {
         0.0
+    }
+}
+
+fn push_active_kth(active_distances: &mut BinaryHeap<KnnDistanceKey>, k: usize, dist: f64) {
+    if active_distances.len() < k {
+        active_distances.push(KnnDistanceKey(dist));
+    } else if let Some(max) = active_distances.peek() {
+        if dist < max.0 {
+            active_distances.pop();
+            active_distances.push(KnnDistanceKey(dist));
+        }
+    }
+}
+
+fn skip_self<K, V, S>(from: Option<&KnnFromEntry<K, V, S>>, id: EntryId) -> bool
+where
+    S: NodeStats<K, V>,
+{
+    from.map(|c| c.id == id && !c.include_self).unwrap_or(false)
+}
+
+fn object_dist<K, V, D, S>(
+    obj: &ObjectNode<K, V, S>,
+    needle: &K,
+    from: Option<&KnnFromEntry<K, V, S>>,
+    distance_fn: &dyn crate::distance::Distance<K, Output = D>,
+) -> f64
+where
+    K: Clone + Send + Sync,
+    V: Send + Sync,
+    D: DistanceType,
+    S: NodeStats<K, V>,
+{
+    if from.map(|c| c.id == obj.id).unwrap_or(false) {
+        0.0
+    } else {
+        dist_as_f64(distance_fn.distance(&obj.key(), needle))
     }
 }
 
@@ -39,6 +78,7 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -51,13 +91,14 @@ where
                 k,
                 is_active,
                 include_inactive,
+                from,
             );
             return results_f64
                 .into_iter()
                 .map(|(arc, d)| (arc, unsafe { std::mem::transmute_copy(&d) }))
                 .collect();
         }
-        self.knn_search_filtered_fallback(needle, k, is_active, include_inactive)
+        self.knn_search_filtered_fallback(needle, k, is_active, include_inactive, from)
     }
 
     /// Gefilterte k-NN: nur aktive Objekte zählen für k und den Pruning-Radius.
@@ -67,20 +108,87 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
 
+        let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
+        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();
+        let prune_cell = Cell::new(f64::INFINITY);
+
+        let consider =
+            |obj: Arc<ObjectNode<K, V, S>>,
+             dist: f64,
+             pruning_relaxed: f64,
+             active_distances: &mut BinaryHeap<KnnDistanceKey>,
+             results: &mut Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)>| {
+                if dist > pruning_relaxed {
+                    return;
+                }
+                let active = {
+                    let guard = obj.value.read().unwrap();
+                    is_active(obj.id, &guard.1)
+                };
+                if active {
+                    results.push((obj, dist, true));
+                    push_active_kth(active_distances, k, dist);
+                } else if include_inactive {
+                    results.push((obj, dist, false));
+                }
+            };
+
+        if let Some(ctx) = from {
+            if let Some(leaf) = &ctx.leaf {
+                let leaf_guard = leaf.lock().unwrap();
+                visit_seeded_leaf_objects(
+                    &leaf_guard,
+                    needle,
+                    ctx,
+                    distance_fn.as_ref(),
+                    &prune_cell,
+                    |obj, dist| {
+                        let pruning_radius = if active_distances.len() >= k {
+                            active_distances
+                                .peek()
+                                .map(|d| d.0)
+                                .unwrap_or(f64::INFINITY)
+                        } else {
+                            f64::INFINITY
+                        };
+                        let pruning_relaxed = if pruning_radius.is_finite() {
+                            pruning_radius * UPPER_BOUND_FACTOR
+                        } else {
+                            f64::INFINITY
+                        };
+                        consider(
+                            obj,
+                            dist,
+                            pruning_relaxed,
+                            &mut active_distances,
+                            &mut results,
+                        );
+                        let pruning_radius = if active_distances.len() >= k {
+                            active_distances
+                                .peek()
+                                .map(|d| d.0)
+                                .unwrap_or(f64::INFINITY)
+                        } else {
+                            f64::INFINITY
+                        };
+                        prune_cell.set(pruning_radius);
+                    },
+                );
+                drop(leaf_guard);
+                if Arc::ptr_eq(leaf, &root) {
+                    return finish_filtered_knn(results, &active_distances, k, include_inactive);
+                }
+            }
+        }
+
         let root_distance = {
             let root_guard = root.lock().unwrap();
-            let d: D = distance_fn.distance(&root_guard.key, needle);
-            if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy(&d) }
-            } else {
-                0.0
-            }
+            dist_as_f64(distance_fn.distance(&root_guard.key, needle))
         };
 
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
@@ -89,10 +197,6 @@ where
             center_distance: root_distance,
             distance_bound: root_distance,
         });
-
-        // Max-Heap der Distanzen der bisher besten aktiven Treffer (Größe ≤ k).
-        let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
-        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();
 
         while let Some(entry) = pq.pop() {
             let pruning_radius = if active_distances.len() >= k {
@@ -117,37 +221,17 @@ where
             if node_guard.is_leaf {
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
-                        let obj_key = obj_node.key();
-                        let dist_d: D = distance_fn.distance(&obj_key, needle);
-                        let dist = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                            && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                        {
-                            unsafe { std::mem::transmute_copy(&dist_d) }
-                        } else {
-                            0.0
-                        };
-                        if dist > pruning_radius_relaxed {
+                        if skip_self(from, obj_node.id) {
                             continue;
                         }
-
-                        let active = {
-                            let guard = obj_node.value.read().unwrap();
-                            is_active(obj_node.id, &guard.1)
-                        };
-
-                        if active {
-                            results.push((obj_node.clone(), dist, true));
-                            if active_distances.len() < k {
-                                active_distances.push(KnnDistanceKey(dist));
-                            } else if let Some(max) = active_distances.peek() {
-                                if dist < max.0 {
-                                    active_distances.pop();
-                                    active_distances.push(KnnDistanceKey(dist));
-                                }
-                            }
-                        } else if include_inactive {
-                            results.push((obj_node.clone(), dist, false));
-                        }
+                        let dist = object_dist(obj_node, needle, from, distance_fn.as_ref());
+                        consider(
+                            obj_node.clone(),
+                            dist,
+                            pruning_radius_relaxed,
+                            &mut active_distances,
+                            &mut results,
+                        );
                     }
                 }
                 continue;
@@ -156,14 +240,7 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
-                    let center_d: D = distance_fn.distance(&child_guard.key, needle);
-                    let center_dist = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                        && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                    {
-                        unsafe { std::mem::transmute_copy(&center_d) }
-                    } else {
-                        0.0
-                    };
+                    let center_dist = dist_as_f64(distance_fn.distance(&child_guard.key, needle));
                     let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
@@ -181,30 +258,7 @@ where
             }
         }
 
-        let final_radius = if active_distances.len() >= k {
-            active_distances
-                .peek()
-                .map(|d| d.0)
-                .unwrap_or(f64::INFINITY)
-        } else {
-            f64::INFINITY
-        };
-
-        results.retain(|(_, dist, _)| {
-            *dist <= final_radius * UPPER_BOUND_FACTOR || !final_radius.is_finite()
-        });
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-
-        if include_inactive {
-            results.into_iter().map(|(n, d, _)| (n, d)).collect()
-        } else {
-            results
-                .into_iter()
-                .filter(|(_, _, active)| *active)
-                .take(k)
-                .map(|(n, d, _)| (n, d))
-                .collect()
-        }
+        finish_filtered_knn(results, &active_distances, k, include_inactive)
     }
 
     /// Fallback für nicht-f64 Distanztypen: alles sammeln, sortieren, filtern.
@@ -214,9 +268,15 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
         let mut all: Vec<_> = self.query_ball(needle, max_radius).collect();
+        if let Some(from) = from {
+            if !from.include_self {
+                all.retain(|(n, _)| n.id != from.id);
+            }
+        }
         all.sort_by(|a, b| {
             dist_as_f64(a.1)
                 .partial_cmp(&dist_as_f64(b.1))
@@ -269,6 +329,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -283,6 +344,7 @@ where
                 max_radius,
                 is_active,
                 include_inactive,
+                from,
             );
             return results_f64
                 .into_iter()
@@ -296,6 +358,7 @@ where
             max_radius,
             is_active,
             include_inactive,
+            from,
         )
     }
 
@@ -307,6 +370,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -316,6 +380,90 @@ where
 
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
+
+        let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
+        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();
+        let prune_cell = Cell::new(f64::INFINITY);
+
+        let consider =
+            |obj: Arc<ObjectNode<K, V, S>>,
+             dist: f64,
+             effective_max_relaxed: f64,
+             active_distances: &mut BinaryHeap<KnnDistanceKey>,
+             results: &mut Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)>| {
+                if dist < min_r || dist >= max_r {
+                    return;
+                }
+                if dist > effective_max_relaxed {
+                    return;
+                }
+                let active = {
+                    let guard = obj.value.read().unwrap();
+                    is_active(obj.id, &guard.1)
+                };
+                if active {
+                    results.push((obj, dist, true));
+                    push_active_kth(active_distances, k, dist);
+                } else if include_inactive {
+                    results.push((obj, dist, false));
+                }
+            };
+
+        if let Some(ctx) = from {
+            if let Some(leaf) = &ctx.leaf {
+                let leaf_guard = leaf.lock().unwrap();
+                visit_seeded_leaf_objects(
+                    &leaf_guard,
+                    needle,
+                    ctx,
+                    distance_fn.as_ref(),
+                    &prune_cell,
+                    |obj, dist| {
+                        let kth = if active_distances.len() >= k {
+                            active_distances
+                                .peek()
+                                .map(|d| d.0)
+                                .unwrap_or(f64::INFINITY)
+                        } else {
+                            f64::INFINITY
+                        };
+                        let effective_max = kth.min(max_r);
+                        let effective_max_relaxed = if effective_max.is_finite() {
+                            effective_max * UPPER_BOUND_FACTOR
+                        } else {
+                            f64::INFINITY
+                        };
+                        consider(
+                            obj,
+                            dist,
+                            effective_max_relaxed,
+                            &mut active_distances,
+                            &mut results,
+                        );
+                        let kth = if active_distances.len() >= k {
+                            active_distances
+                                .peek()
+                                .map(|d| d.0)
+                                .unwrap_or(f64::INFINITY)
+                        } else {
+                            f64::INFINITY
+                        };
+                        prune_cell.set(kth.min(max_r));
+                    },
+                );
+                drop(leaf_guard);
+                if Arc::ptr_eq(leaf, &root) {
+                    return finish_filtered_range_knn(
+                        results,
+                        &active_distances,
+                        k,
+                        include_inactive,
+                        min_r,
+                        max_r,
+                    );
+                }
+            }
+        }
 
         let (root_distance, root_upper) = {
             let root_guard = root.lock().unwrap();
@@ -329,9 +477,6 @@ where
             center_distance: root_distance,
             distance_bound: root_upper,
         });
-
-        let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
-        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();
 
         while let Some(entry) = pq.pop() {
             let kth = if active_distances.len() >= k {
@@ -357,36 +502,25 @@ where
                 break;
             }
 
+            if is_seeded_leaf(from, &entry.node) {
+                continue;
+            }
+
             let node_guard = entry.node.lock().unwrap();
             if node_guard.is_leaf {
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
-                        let dist = dist_as_f64(distance_fn.distance(&obj_node.key(), needle));
-                        if dist < min_r || dist >= max_r {
+                        if skip_self(from, obj_node.id) {
                             continue;
                         }
-                        if dist > effective_max_relaxed {
-                            continue;
-                        }
-
-                        let active = {
-                            let guard = obj_node.value.read().unwrap();
-                            is_active(obj_node.id, &guard.1)
-                        };
-
-                        if active {
-                            results.push((obj_node.clone(), dist, true));
-                            if active_distances.len() < k {
-                                active_distances.push(KnnDistanceKey(dist));
-                            } else if let Some(max) = active_distances.peek() {
-                                if dist < max.0 {
-                                    active_distances.pop();
-                                    active_distances.push(KnnDistanceKey(dist));
-                                }
-                            }
-                        } else if include_inactive {
-                            results.push((obj_node.clone(), dist, false));
-                        }
+                        let dist = object_dist(obj_node, needle, from, distance_fn.as_ref());
+                        consider(
+                            obj_node.clone(),
+                            dist,
+                            effective_max_relaxed,
+                            &mut active_distances,
+                            &mut results,
+                        );
                     }
                 }
                 continue;
@@ -416,33 +550,14 @@ where
             }
         }
 
-        let final_cap = if active_distances.len() >= k {
-            active_distances
-                .peek()
-                .map(|d| d.0)
-                .unwrap_or(max_r)
-                .min(max_r)
-        } else {
-            max_r
-        };
-
-        results.retain(|(_, dist, _)| {
-            let within_k =
-                active_distances.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-            *dist >= min_r && *dist < max_r && within_k
-        });
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-
-        if include_inactive {
-            results.into_iter().map(|(n, d, _)| (n, d)).collect()
-        } else {
-            results
-                .into_iter()
-                .filter(|(_, _, active)| *active)
-                .take(k)
-                .map(|(n, d, _)| (n, d))
-                .collect()
-        }
+        finish_filtered_range_knn(
+            results,
+            &active_distances,
+            k,
+            include_inactive,
+            min_r,
+            max_r,
+        )
     }
 
     fn knn_search_range_filtered_fallback(
@@ -453,6 +568,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
+        from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -461,6 +577,11 @@ where
         }
 
         let mut all: Vec<_> = self.query_annulus(needle, min_radius, max_radius).collect();
+        if let Some(from) = from {
+            if !from.include_self {
+                all.retain(|(n, _)| n.id != from.id);
+            }
+        }
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);
             dist >= min_r && dist < max_r
@@ -507,5 +628,79 @@ where
         }
 
         out
+    }
+}
+
+fn finish_filtered_knn<K, V, S>(
+    mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)>,
+    active_distances: &BinaryHeap<KnnDistanceKey>,
+    k: usize,
+    include_inactive: bool,
+) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)>
+where
+    S: NodeStats<K, V>,
+{
+    let final_radius = if active_distances.len() >= k {
+        active_distances
+            .peek()
+            .map(|d| d.0)
+            .unwrap_or(f64::INFINITY)
+    } else {
+        f64::INFINITY
+    };
+
+    results.retain(|(_, dist, _)| {
+        *dist <= final_radius * UPPER_BOUND_FACTOR || !final_radius.is_finite()
+    });
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+
+    if include_inactive {
+        results.into_iter().map(|(n, d, _)| (n, d)).collect()
+    } else {
+        results
+            .into_iter()
+            .filter(|(_, _, active)| *active)
+            .take(k)
+            .map(|(n, d, _)| (n, d))
+            .collect()
+    }
+}
+
+fn finish_filtered_range_knn<K, V, S>(
+    mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)>,
+    active_distances: &BinaryHeap<KnnDistanceKey>,
+    k: usize,
+    include_inactive: bool,
+    min_r: f64,
+    max_r: f64,
+) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)>
+where
+    S: NodeStats<K, V>,
+{
+    let final_cap = if active_distances.len() >= k {
+        active_distances
+            .peek()
+            .map(|d| d.0)
+            .unwrap_or(max_r)
+            .min(max_r)
+    } else {
+        max_r
+    };
+
+    results.retain(|(_, dist, _)| {
+        let within_k = active_distances.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
+        *dist >= min_r && *dist < max_r && within_k
+    });
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+
+    if include_inactive {
+        results.into_iter().map(|(n, d, _)| (n, d)).collect()
+    } else {
+        results
+            .into_iter()
+            .filter(|(_, _, active)| *active)
+            .take(k)
+            .map(|(n, d, _)| (n, d))
+            .collect()
     }
 }
