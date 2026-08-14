@@ -141,6 +141,121 @@ mod tests {
     }
 
     #[test]
+    fn test_knn_from_entry_include_self() {
+        let mut tree = new_tree_i64();
+        let origin = tree.insert((0, 0), "origin".to_string()).unwrap();
+        tree.insert((1, 0), "one".to_string()).unwrap();
+        tree.insert((2, 0), "two".to_string()).unwrap();
+        tree.insert((3, 0), "three".to_string()).unwrap();
+
+        let with_self = tree.knn_from_entry(origin, 2, true, ()).unwrap();
+        let by_key = tree.knn_search(&(0, 0), 2, ());
+        assert_eq!(with_self.len(), 2);
+        assert_eq!(with_self[0].0.id, origin);
+        assert_eq!(with_self[0].1, 0.0);
+        assert_eq!(with_self[0].0.payload(), by_key[0].0.payload());
+        assert_eq!(with_self[1].0.payload(), by_key[1].0.payload());
+        assert!((with_self[1].1 - by_key[1].1).abs() < 1e-9);
+
+        let without = tree.knn_from_entry(origin, 2, false, ()).unwrap();
+        assert_eq!(without.len(), 2);
+        assert!(without.iter().all(|(n, _)| n.id != origin));
+        assert_eq!(without[0].0.payload(), "one");
+        assert_eq!(without[1].0.payload(), "two");
+    }
+
+    #[test]
+    fn test_knn_from_entry_unknown_and_k_zero() {
+        let mut tree = new_tree_i64();
+        let id = tree.insert((0, 0), "a".to_string()).unwrap();
+        assert!(tree.knn_from_entry(id, 0, true, ()).unwrap().is_empty());
+        assert!(tree.erase_by_id(id));
+        assert!(tree.knn_from_entry(id, 3, false, ()).is_none());
+    }
+
+    #[test]
+    fn test_knn_from_entry_vs_knn_search() {
+        let data = test_data();
+        let mut small = MTree::with_params(2, 4, 3, Euclid2d);
+        let mut wide = new_tree_i64();
+        let mut ids = Vec::new();
+        for (k, v) in &data {
+            ids.push(small.insert(*k, v.clone()).unwrap());
+            wide.insert(*k, v.clone()).unwrap();
+        }
+
+        for id in &ids {
+            let key = small.get(*id).unwrap().key();
+            for k in [1usize, 3, 5, 10] {
+                let with_self = small.knn_from_entry(*id, k, true, ()).unwrap();
+                assert!(!with_self.is_empty());
+                assert_eq!(with_self[0].0.id, *id);
+                assert_eq!(with_self[0].1, 0.0);
+                let without = small.knn_from_entry(*id, k, false, ()).unwrap();
+                assert!(without.iter().all(|(n, _)| n.id != *id));
+                assert!(without.windows(2).all(|w| w[0].1 <= w[1].1));
+
+                let from_wide = wide.knn_from_entry(*id, k, true, ()).unwrap();
+                let by_key = wide.knn_search(&key, k, ());
+                assert_eq!(from_wide.len(), by_key.len());
+                for (a, b) in from_wide.iter().zip(by_key.iter()) {
+                    assert_eq!(a.0.key(), b.0.key());
+                    assert!((a.1 - b.1).abs() < 1e-9);
+                }
+
+                let without_wide = wide.knn_from_entry(*id, k, false, ()).unwrap();
+                let naive = naive_knn_search(&data, &key, data.len());
+                let expected: Vec<_> = naive
+                    .into_iter()
+                    .filter(|(nk, _, _)| *nk != key)
+                    .take(k)
+                    .collect();
+                assert_eq!(without_wide.len(), expected.len());
+                for (a, b) in without_wide.iter().zip(expected.iter()) {
+                    assert_eq!(a.0.key(), b.0);
+                    assert!((a.1 - b.2).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_knn_from_entry_filter_and_annulus() {
+        let mut tree = new_tree_i64();
+        let origin = tree.insert((0, 0), "active:origin".to_string()).unwrap();
+        tree.insert((1, 0), "inactive:one".to_string()).unwrap();
+        tree.insert((2, 0), "active:two".to_string()).unwrap();
+        tree.insert((3, 0), "active:three".to_string()).unwrap();
+
+        let is_active = |_id, v: &String| v.starts_with("active:");
+        let hits = tree
+            .knn_from_entry(
+                origin,
+                2,
+                false,
+                KnnConfig::new()
+                    .with_active(is_active)
+                    .include_inactive(false),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0.payload(), "active:two");
+        assert_eq!(hits[1].0.payload(), "active:three");
+
+        let band = tree
+            .knn_from_entry(origin, 10, true, KnnConfig::new().min_radius(1.0).max_radius(3.0))
+            .unwrap();
+        let payloads: Vec<_> = band.iter().map(|(n, _)| n.payload()).collect();
+        assert!(!payloads.iter().any(|p| p.contains("origin")));
+        assert!(payloads.contains(&"inactive:one".to_string()) || payloads.contains(&"active:two".to_string()));
+        let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
+        assert!(keys.contains(&(1, 0)));
+        assert!(keys.contains(&(2, 0)));
+        assert!(!keys.contains(&(0, 0)));
+        assert!(!keys.contains(&(3, 0)));
+    }
+
+    #[test]
     fn test_clear() {
         let mut tree = new_tree_i64();
         tree.insert((1, 2), "a".to_string()).unwrap();
