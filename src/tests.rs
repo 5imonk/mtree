@@ -49,7 +49,7 @@ mod tests {
         data.iter()
             .filter(|(k, _)| {
                 let d = dist.distance(k, needle);
-                d >= min_radius && d < max_radius
+                d > min_radius && d <= max_radius
             })
             .cloned()
             .collect()
@@ -110,6 +110,10 @@ mod tests {
         let results: Vec<_> = tree.search(&(0, 0), SearchConfig::new(0.5, 1.5)).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.payload(), "b");
+        // min exklusiv, max inklusiv: 1 < d <= 2 → nur c
+        let closed_max: Vec<_> = tree.search(&(0, 0), SearchConfig::new(1.0, 2.0)).collect();
+        assert_eq!(closed_max.len(), 1);
+        assert_eq!(closed_max[0].0.payload(), "c");
     }
 
     #[test]
@@ -247,12 +251,12 @@ mod tests {
             .unwrap();
         let payloads: Vec<_> = band.iter().map(|(n, _)| n.payload()).collect();
         assert!(!payloads.iter().any(|p| p.contains("origin")));
-        assert!(payloads.contains(&"inactive:one".to_string()) || payloads.contains(&"active:two".to_string()));
         let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
-        assert!(keys.contains(&(1, 0)));
+        // min < dist <= max: 1 < d <= 3 → (2,0), (3,0); (1,0) auf min ausgeschlossen
+        assert!(!keys.contains(&(1, 0)));
         assert!(keys.contains(&(2, 0)));
+        assert!(keys.contains(&(3, 0)));
         assert!(!keys.contains(&(0, 0)));
-        assert!(!keys.contains(&(3, 0)));
     }
 
     #[test]
@@ -747,23 +751,23 @@ mod tests {
         tree.insert((3, 0), "d3".to_string()).unwrap();
         tree.insert((4, 0), "d4".to_string()).unwrap();
 
-        // min ≤ dist < max: 1 ≤ d < 3 → d1, d2 (d3 bei max ausgeschlossen)
+        // min < dist <= max: 1 < d <= 3 → d2, d3 (d1 bei min ausgeschlossen, d3 bei max dabei)
         let hits = tree.knn_search(&(0, 0), 10, KnnConfig::new().min_radius(1.0).max_radius(3.0));
         let payloads: Vec<_> = hits.iter().map(|(n, _)| n.payload()).collect();
         assert_eq!(hits.len(), 2);
-        assert_eq!(payloads, vec!["d1".to_string(), "d2".to_string()]);
+        assert_eq!(payloads, vec!["d2".to_string(), "d3".to_string()]);
 
         // k begrenzt
         let top1 = tree.knn_search(&(0, 0), 1, KnnConfig::new().min_radius(1.0).max_radius(3.0));
         assert_eq!(top1.len(), 1);
-        assert_eq!(top1[0].0.payload(), "d1");
+        assert_eq!(top1[0].0.payload(), "d2");
 
-        // dist == max_radius ausgeschlossen; dist == min_radius eingeschlossen
+        // dist == min_radius ausgeschlossen; dist == max_radius eingeschlossen
         let band = tree.knn_search(&(0, 0), 5, KnnConfig::new().min_radius(2.0).max_radius(4.0));
         let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
-        assert!(keys.contains(&(2, 0)));
+        assert!(!keys.contains(&(2, 0)));
         assert!(keys.contains(&(3, 0)));
-        assert!(!keys.contains(&(4, 0)));
+        assert!(keys.contains(&(4, 0)));
     }
 
     #[test]
@@ -771,11 +775,10 @@ mod tests {
         let mut tree = new_tree_i64();
         tree.insert((0, 0), "a".to_string()).unwrap();
         tree.insert((5, 0), "b".to_string()).unwrap();
-        // 0 ≤ d < 10 → a und b
+        // 0 < d <= 10 → nur b (Ursprung bei min=0 ausgeschlossen)
         let hits = tree.knn_search(&(0, 0), 5, KnnConfig::new().min_radius(0.0).max_radius(10.0));
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].0.payload(), "a");
-        assert_eq!(hits[1].0.payload(), "b");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.payload(), "b");
     }
 
     #[test]
@@ -789,10 +792,11 @@ mod tests {
 
         let is_active = |_id, v: &String| v.starts_with("active:");
 
-        // 0.5 ≤ d < 4: b(1), c(2), d(3); e(4) ausgeschlossen. Aktive: c
+        // 0.5 < d <= 4: b(1), c(2), d(3), e(4). Aktive: c, e
         let only = tree.knn_search(&(0, 0), 2, KnnConfig::new().min_radius(0.5).max_radius(4.0).with_active(is_active).include_inactive(false));
-        assert_eq!(only.len(), 1);
+        assert_eq!(only.len(), 2);
         assert_eq!(only[0].0.payload(), "active:c");
+        assert_eq!(only[1].0.payload(), "active:e");
 
         let with_inactive =
             tree.knn_search(&(0, 0), 2, KnnConfig::new().min_radius(0.5).max_radius(4.0).with_active(is_active).include_inactive(true));
@@ -800,7 +804,7 @@ mod tests {
         assert!(payloads.contains(&"inactive:b".to_string()));
         assert!(payloads.contains(&"active:c".to_string()));
         assert!(payloads.contains(&"inactive:d".to_string()));
-        assert!(!payloads.contains(&"active:e".to_string()));
+        assert!(payloads.contains(&"active:e".to_string()));
         assert!(!payloads.contains(&"active:a".to_string()));
     }
 }

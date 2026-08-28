@@ -63,7 +63,7 @@ fn naive_search_min_max(
     data.iter()
         .filter(|(k, _)| {
             let d = dist.distance(k, needle);
-            d >= min_radius && d <= max_radius
+            d > min_radius && d <= max_radius
         })
         .cloned()
         .collect()

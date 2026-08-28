@@ -15,7 +15,7 @@
 //! Ohne Filter reicht `KnnConfig::new()` bzw. `SearchConfig::new(min, max)` /
 //! `RangeSearchConfig::new(radius)`. Filter setzen mit `.with_active(f)`.
 //!
-//! Annulus-Semantik bei k-NN und `search`: `min_radius ≤ dist < max_radius`
+//! Annulus-Semantik bei k-NN und `search`: `min_radius < dist ≤ max_radius`
 //! (`None` in `KnnConfig` → 0 bzw. ∞). `range_search` bleibt die Kugel `dist ≤ radius`.
 
 use crate::entry::EntryId;
@@ -27,7 +27,7 @@ pub struct NoFilter;
 
 /// Optionen für [`crate::tree::MTree::knn_search`].
 ///
-/// - `min_radius` / `max_radius`: Annulus `min ≤ dist < max` (`None` → 0 bzw. ∞)
+/// - `min_radius` / `max_radius`: Annulus `min < dist ≤ max` (`None` → 0 bzw. ∞)
 /// - `is_active`: optionaler Filter; `include_inactive` nur wirksam wenn `is_active` gesetzt
 pub struct KnnConfig<D, F = NoFilter> {
     pub is_active: Option<F>,
@@ -159,7 +159,7 @@ where
     }
 }
 
-/// Config für Annulus-Bereichssuche (`min ≤ dist < max`).
+/// Config für Annulus-Bereichssuche (`min < dist ≤ max`).
 pub struct SearchConfig<D, F = NoFilter> {
     pub min_radius: D,
     pub max_radius: D,

@@ -60,9 +60,9 @@ Vier öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radius
 
 | Methode | Bedeutung |
 |---------|-----------|
-| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`) |
+| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`); mit Radien `min < dist ≤ max` |
 | `knn_from_entry` | k-NN von einem gespeicherten `EntryId`; `include_self` steuert, ob der Punkt selbst zählt |
-| `search` | Annulus `min_radius ≤ dist < max_radius` (`SearchConfig` Pflicht) |
+| `search` | Annulus `min_radius < dist ≤ max_radius` (`SearchConfig` Pflicht) |
 | `range_search` | Kugel `dist ≤ radius` (`RangeSearchConfig` Pflicht) |
 
 ```rust
