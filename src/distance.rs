@@ -4,7 +4,33 @@
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+/// Obere Schranke für das Identity-Epsilon (`2^-40`).
+pub const EPSILON_MAX: f64 = 1.0 / ((1u64 << 40) as f64);
+
+/// Stabiler Hash einer Identitätsquelle (Index, Timestamp, …). Nicht `RandomState`.
+pub fn identity_hash<T: Hash>(identity: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    identity.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Skaliert einen Identity-Hash auf `(0, EPSILON_MAX]` (`0` bleibt `0`).
+pub fn epsilon_from_hash(hash: u64) -> f64 {
+    if hash == 0 {
+        return 0.0;
+    }
+    let bits = hash & ((1u64 << 53) - 1);
+    let bits = if bits == 0 { 1 } else { bits };
+    (bits as f64) * (EPSILON_MAX / ((1u64 << 53) as f64))
+}
+
+/// `ε` aus einer Identitätsquelle (Index, Timestamp, …).
+pub fn epsilon_from<T: Hash>(identity: &T) -> f64 {
+    epsilon_from_hash(identity_hash(identity))
+}
 
 /// Trait für Typen, die Koordinaten als f64-Slice bereitstellen
 /// Ermöglicht SIMD-optimierte Distanzberechnung für beliebige Key-Typen

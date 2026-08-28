@@ -15,7 +15,7 @@ use crate::search_config::{
 };
 use crate::stats::NodeStats;
 use crate::tree::{
-    DistanceType, KnnDistanceKey, KnnQueueEntry, KnnTag, MTree, LOWER_BOUND_FACTOR,
+    metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, KnnTag, MTree, LOWER_BOUND_FACTOR,
     UPPER_BOUND_FACTOR,
 };
 use std::cell::Cell;
@@ -50,6 +50,7 @@ where
 pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
     leaf: &RoutingNode<K, V, S>,
     needle: &K,
+    needle_eps: f64,
     from: &KnnFromEntry<K, V, S>,
     distance_fn: &dyn Distance<K, Output = D>,
     pruning_radius: &Cell<f64>,
@@ -69,7 +70,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
                 continue;
             }
             let pr = pruning_radius.get();
-            let dist = dist_as_f64(distance_fn.distance(&obj.key(), needle));
+            let dist = metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps);
             if pr.is_finite() && dist > pr * UPPER_BOUND_FACTOR {
                 continue;
             }
@@ -112,12 +113,14 @@ where
     pub(crate) fn query_annulus(
         &self,
         needle: &K,
+        needle_eps: f64,
         min_radius: D,
         max_radius: D,
     ) -> Query<K, V, D, S> {
         if let Some(ref root) = self.root {
             Query::new(
                 needle.clone(),
+                needle_eps,
                 min_radius,
                 max_radius,
                 root.clone(),
@@ -129,10 +132,16 @@ where
     }
 
     /// Interne Kugel-Query (`dist ≤ radius`), ohne Filter.
-    pub(crate) fn query_ball(&self, needle: &K, radius: D) -> RangeQuery<K, V, D, S> {
+    pub(crate) fn query_ball(
+        &self,
+        needle: &K,
+        needle_eps: f64,
+        radius: D,
+    ) -> RangeQuery<K, V, D, S> {
         if let Some(ref root) = self.root {
             RangeQuery::new(
                 needle.clone(),
+                needle_eps,
                 radius,
                 root.clone(),
                 self.distance_fn.clone_box(),
@@ -149,7 +158,7 @@ where
         config: impl IntoSearchConfig<'a, D, V>,
     ) -> FilteredQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_search_config();
-        let inner = self.query_annulus(needle, cfg.min_radius, cfg.max_radius);
+        let inner = self.query_annulus(needle, cfg.epsilon, cfg.min_radius, cfg.max_radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
             cfg.is_active.unwrap_or_else(|| Box::new(|_, _| true));
         FilteredQuery::new(inner, pred)
@@ -162,7 +171,7 @@ where
         config: impl IntoRangeSearchConfig<'a, D, V>,
     ) -> FilteredRangeQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_range_search_config();
-        let inner = self.query_ball(needle, cfg.radius);
+        let inner = self.query_ball(needle, cfg.epsilon, cfg.radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
             cfg.is_active.unwrap_or_else(|| Box::new(|_, _| true));
         FilteredRangeQuery::new(inner, pred)
@@ -179,7 +188,7 @@ where
         config: impl IntoKnnConfig<'a, D, V>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let cfg = config.into_knn_config();
-        self.knn_search_dispatch(needle, k, cfg, None)
+        self.knn_search_dispatch(needle, cfg.epsilon, k, cfg, None)
     }
 
     /// k-NN mit einem gespeicherten Eintrag als Query.
@@ -200,18 +209,20 @@ where
             return Some(Vec::new());
         }
         let key = obj.key();
+        let needle_eps = obj.epsilon();
         let ctx = KnnFromEntry {
             id,
             include_self,
             leaf: obj.parent(),
         };
         let cfg = config.into_knn_config();
-        Some(self.knn_search_dispatch(&key, k, cfg, Some(&ctx)))
+        Some(self.knn_search_dispatch(&key, needle_eps, k, cfg, Some(&ctx)))
     }
 
     fn knn_search_dispatch(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         cfg: KnnConfigResolved<'_, D, V>,
         from: Option<&KnnFromEntry<K, V, S>>,
@@ -221,17 +232,19 @@ where
         let max_r = cfg.max_radius.unwrap_or_else(D::infinity);
 
         match (has_annulus, cfg.is_active) {
-            (false, None) => self.knn_search_plain(needle, k, from),
+            (false, None) => self.knn_search_plain(needle, needle_eps, k, from),
             (false, Some(active)) => self.knn_search_filtered(
                 needle,
+                needle_eps,
                 k,
                 active.as_ref(),
                 cfg.include_inactive,
                 from,
             ),
-            (true, None) => self.knn_search_range(needle, k, min_r, max_r, from),
+            (true, None) => self.knn_search_range(needle, needle_eps, k, min_r, max_r, from),
             (true, Some(active)) => self.knn_search_range_filtered(
                 needle,
+                needle_eps,
                 k,
                 min_r,
                 max_r,
@@ -246,6 +259,7 @@ where
     pub(crate) fn knn_search_plain(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
@@ -255,19 +269,20 @@ where
         if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
             && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
         {
-            let results_f64 = self.knn_search_with_placeholder_queue(needle, k, from);
+            let results_f64 = self.knn_search_with_placeholder_queue(needle, needle_eps, k, from);
             return results_f64
                 .into_iter()
                 .map(|(arc, d)| (arc, unsafe { std::mem::transmute_copy(&d) }))
                 .collect();
         }
-        self.knn_search_fallback(needle, k, from)
+        self.knn_search_fallback(needle, needle_eps, k, from)
     }
 
     /// k-NN mit PlaceholderQueue und dynamischem Pruning (intern, D als f64 verwendet)
     fn knn_search_with_placeholder_queue(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
@@ -288,6 +303,7 @@ where
                 visit_seeded_leaf_objects(
                     &leaf_guard,
                     needle,
+                    needle_eps,
                     ctx,
                     distance_fn.as_ref(),
                     &prune_cell,
@@ -322,7 +338,7 @@ where
 
         let root_distance = {
             let root_guard = root.lock().unwrap();
-            dist_as_f64(distance_fn.distance(&root_guard.key, needle))
+            metric_f64(distance_fn.as_ref(), &root_guard.key, root_guard.epsilon, needle, needle_eps)
         };
 
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
@@ -360,7 +376,13 @@ where
                         let dist = if from.map(|c| c.id == obj_node.id).unwrap_or(false) {
                             0.0
                         } else {
-                            dist_as_f64(distance_fn.distance(&obj_node.key(), needle))
+                            metric_f64(
+                                distance_fn.as_ref(),
+                                &obj_node.key(),
+                                obj_node.epsilon(),
+                                needle,
+                                needle_eps,
+                            )
                         };
                         if dist <= pruning_radius {
                             results.push((obj_node.clone(), dist));
@@ -380,7 +402,13 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
-                    let center_dist = dist_as_f64(distance_fn.distance(&child_guard.key, needle));
+                    let center_dist = metric_f64(
+                        distance_fn.as_ref(),
+                        &child_guard.key,
+                        child_guard.epsilon,
+                        needle,
+                        needle_eps,
+                    );
                     let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
@@ -409,11 +437,12 @@ where
     fn knn_search_fallback(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         from: Option<&KnnFromEntry<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
-        let mut results: Vec<_> = self.query_ball(needle, max_radius).collect();
+        let mut results: Vec<_> = self.query_ball(needle, needle_eps, max_radius).collect();
         retain_exclude_self(&mut results, from);
         results.sort_by(|a, b| {
             let da = dist_as_f64(a.1);
@@ -427,6 +456,7 @@ where
     pub(crate) fn knn_search_range(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         min_radius: D,
         max_radius: D,
@@ -439,18 +469,19 @@ where
             && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
         {
             let results_f64 =
-                self.knn_search_range_with_queue(needle, k, min_radius, max_radius, from);
+                self.knn_search_range_with_queue(needle, needle_eps, k, min_radius, max_radius, from);
             return results_f64
                 .into_iter()
                 .map(|(arc, d)| (arc, unsafe { std::mem::transmute_copy(&d) }))
                 .collect();
         }
-        self.knn_search_range_fallback(needle, k, min_radius, max_radius, from)
+        self.knn_search_range_fallback(needle, needle_eps, k, min_radius, max_radius, from)
     }
 
     fn knn_search_range_with_queue(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         min_radius: D,
         max_radius: D,
@@ -475,6 +506,7 @@ where
                 visit_seeded_leaf_objects(
                     &leaf_guard,
                     needle,
+                    needle_eps,
                     ctx,
                     distance_fn.as_ref(),
                     &prune_cell,
@@ -532,7 +564,13 @@ where
 
         let (root_distance, root_upper) = {
             let root_guard = root.lock().unwrap();
-            let d = dist_as_f64(distance_fn.distance(&root_guard.key, needle));
+            let d = metric_f64(
+                distance_fn.as_ref(),
+                &root_guard.key,
+                root_guard.epsilon,
+                needle,
+                needle_eps,
+            );
             (d, d + root_guard.covering_radius)
         };
 
@@ -580,7 +618,13 @@ where
                         let dist = if from.map(|c| c.id == obj_node.id).unwrap_or(false) {
                             0.0
                         } else {
-                            dist_as_f64(distance_fn.distance(&obj_node.key(), needle))
+                            metric_f64(
+                                distance_fn.as_ref(),
+                                &obj_node.key(),
+                                obj_node.epsilon(),
+                                needle,
+                                needle_eps,
+                            )
                         };
                         if dist <= min_r || dist > max_r {
                             continue;
@@ -606,7 +650,13 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
-                    let center_dist = dist_as_f64(distance_fn.distance(&child_guard.key, needle));
+                    let center_dist = metric_f64(
+                        distance_fn.as_ref(),
+                        &child_guard.key,
+                        child_guard.epsilon,
+                        needle,
+                        needle_eps,
+                    );
                     let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
@@ -644,6 +694,7 @@ where
     fn knn_search_range_fallback(
         &self,
         needle: &K,
+        needle_eps: f64,
         k: usize,
         min_radius: D,
         max_radius: D,
@@ -655,7 +706,7 @@ where
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self.query_annulus(needle, min_radius, max_radius).collect();
+        let mut all: Vec<_> = self.query_annulus(needle, needle_eps, min_radius, max_radius).collect();
         retain_exclude_self(&mut all, from);
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);

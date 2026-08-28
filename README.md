@@ -15,6 +15,7 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 | | Rolle |
 |---|--------|
 | **Key `K`** | Position im Metrikraum (Koordinaten) — bestimmt Baum und Suche |
+| **Identity** | Optionaler Index/Timestamp; wird zu einem winzigen `ε` gehasht. Gleiche `K` + verschiedene Identity = zwei Einträge |
 | **Value `V`** | Nutzdaten (Label, Struct, …) — nicht für Routing |
 | **`EntryId`** | Library-Handle für O(1) `get` / `erase_by_id` / `update_*` |
 
@@ -136,12 +137,26 @@ tree.update_value(id, "neu".to_string());           // nur V ändern
 tree.update_key(id, (10, 20)).expect("key free");   // K ändern (Baum-Relokation)
 ```
 
-Duplikat-Keys werden abgelehnt:
+Duplikat-Keys ohne Identity werden abgelehnt. Mit Identity dürfen gleiche Koordinaten mehrfach vorkommen:
 
 ```rust
 tree.insert((1, 2), "a".to_string()).unwrap();
 assert!(matches!(tree.insert((1, 2), "b".into()), Err(DuplicateKey)));
+
+let t1 = 1_000u64;
+let t2 = 2_000u64;
+tree.insert_with_identity((1, 2), "event-a".into(), &t1).unwrap();
+tree.insert_with_identity((1, 2), "event-b".into(), &t2).unwrap();
+
+// Dieselbe Quelle bei der Query → Distanz 0 zu genau diesem Eintrag
+let hits: Vec<_> = tree
+    .range_search(&(1, 2), RangeSearchConfig::new(0.0).identity(&t1))
+    .collect();
 ```
+
+Die Metrik ist überall `d'(a,b) = Distance(K_a, K_b) + |ε_a − ε_b|` mit `ε = epsilon_from(identity)` (Bereich `(0, 2^-40]`, Identity `0` → `ε = 0`). Dasselbe gilt für `knn_search` / `search` über `.identity(&quelle)` bzw. `.epsilon(ε)`. `knn_from_entry` verwendet das gespeicherte `ε` des Eintrags.
+
+`erase_by_key(&K)` löscht nur, wenn genau ein Eintrag mit diesem Key existiert; sonst `erase_by_id` oder `erase_by_key_identity`.
 
 Für Float-Vektoren als Key: `mtree::distance::Point` verwenden (`Hash` + `Eq` auf Bit-Pattern).
 

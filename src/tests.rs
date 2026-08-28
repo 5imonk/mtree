@@ -554,6 +554,91 @@ mod tests {
     }
 
     #[test]
+    fn test_same_coords_different_identity() {
+        use crate::{epsilon_from, EPSILON_MAX};
+        let mut tree = new_tree_i64();
+        let t1 = 1_000u64;
+        let t2 = 2_000u64;
+        tree.insert_with_identity((5, 5), "first".to_string(), &t1)
+            .unwrap();
+        tree.insert_with_identity((5, 5), "second".to_string(), &t2)
+            .unwrap();
+        assert!(matches!(
+            tree.insert_with_identity((5, 5), "again".to_string(), &t1),
+            Err(DuplicateKey)
+        ));
+        assert_eq!(tree.size(), 2);
+
+        let e1 = epsilon_from(&t1);
+        let e2 = epsilon_from(&t2);
+        assert!(e1 > 0.0 && e1 <= EPSILON_MAX);
+        assert!(e2 > 0.0 && e2 <= EPSILON_MAX);
+        assert_ne!(e1, e2);
+
+        let hits: Vec<_> = tree
+            .range_search(
+                &(5, 5),
+                RangeSearchConfig::new(0.0).identity(&t1),
+            )
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.payload(), "first");
+        assert_eq!(hits[0].1, 0.0);
+
+        let other: Vec<_> = tree
+            .range_search(
+                &(5, 5),
+                RangeSearchConfig::new((e1 - e2).abs()).identity(&t1),
+            )
+            .collect();
+        assert_eq!(other.len(), 2);
+
+        let knn = tree.knn_search(&(5, 5), 1, KnnConfig::new().identity(&t2));
+        assert_eq!(knn.len(), 1);
+        assert_eq!(knn[0].0.payload(), "second");
+        assert_eq!(knn[0].1, 0.0);
+
+        assert!(!tree.erase_by_key(&(5, 5)));
+        assert!(tree.erase_by_key_identity(&(5, 5), &t1));
+        assert_eq!(tree.size(), 1);
+        assert!(tree.erase_by_key(&(5, 5)));
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_identity_query_outside_tiny_ball() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "plain".to_string()).unwrap();
+        tree.insert_with_identity((0, 0), "id".to_string(), &42u64)
+            .unwrap();
+        let far = tree.insert((10, 0), "far".to_string()).unwrap();
+        let _ = far;
+
+        let in_ball: Vec<_> = tree
+            .range_search(&(0, 0), RangeSearchConfig::new(0.5))
+            .collect();
+        assert_eq!(in_ball.len(), 2);
+
+        let knn = tree.knn_search(&(0, 0), 2, ());
+        assert_eq!(knn.len(), 2);
+        assert!(knn.iter().all(|(n, _)| n.key() == (0, 0)));
+
+        let from_entry = tree
+            .knn_from_entry(
+                tree.iter()
+                    .find(|n| n.payload() == "id")
+                    .unwrap()
+                    .id,
+                1,
+                true,
+                (),
+            )
+            .unwrap();
+        assert_eq!(from_entry[0].0.payload(), "id");
+        assert_eq!(from_entry[0].1, 0.0);
+    }
+
+    #[test]
     fn test_erase_by_id() {
         let mut tree = new_tree_i64();
         let id1 = tree.insert((1, 2), "x".to_string()).unwrap();
