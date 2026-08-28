@@ -18,8 +18,10 @@
 //! Annulus-Semantik bei k-NN und `search`: `min_radius < dist ≤ max_radius`
 //! (`None` in `KnnConfig` → 0 bzw. ∞). `range_search` bleibt die Kugel `dist ≤ radius`.
 
+use crate::distance::{epsilon_from_hash, identity_hash};
 use crate::entry::EntryId;
 use crate::tree::DistanceType;
+use std::hash::Hash;
 
 /// Marker: kein Filter gesetzt (Default für Config-Typen).
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,6 +36,8 @@ pub struct KnnConfig<D, F = NoFilter> {
     pub include_inactive: bool,
     pub min_radius: Option<D>,
     pub max_radius: Option<D>,
+    /// Needle-ε (Default 0). Setzen über [`KnnConfig::identity`] oder [`KnnConfig::epsilon`].
+    pub epsilon: f64,
 }
 
 impl<D: DistanceType> KnnConfig<D, NoFilter> {
@@ -43,6 +47,7 @@ impl<D: DistanceType> KnnConfig<D, NoFilter> {
             include_inactive: false,
             min_radius: None,
             max_radius: None,
+            epsilon: 0.0,
         }
     }
 }
@@ -60,6 +65,7 @@ impl<D, F> KnnConfig<D, F> {
             include_inactive: self.include_inactive,
             min_radius: self.min_radius,
             max_radius: self.max_radius,
+            epsilon: self.epsilon,
         }
     }
 
@@ -77,6 +83,17 @@ impl<D, F> KnnConfig<D, F> {
         self.max_radius = Some(r);
         self
     }
+
+    /// Needle-ε aus Index/Timestamp (gleiche Quelle wie beim Insert).
+    pub fn identity<T: Hash>(mut self, identity: &T) -> Self {
+        self.epsilon = epsilon_from_hash(identity_hash(identity));
+        self
+    }
+
+    pub fn epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = epsilon;
+        self
+    }
 }
 
 /// Aufgelöstes k-NN-Config (intern / Trait-Objekt für Filter).
@@ -85,6 +102,7 @@ pub struct KnnConfigResolved<'a, D, V> {
     pub include_inactive: bool,
     pub min_radius: Option<D>,
     pub max_radius: Option<D>,
+    pub epsilon: f64,
 }
 
 /// Ermöglicht `knn_search(needle, k, ())` und `knn_search(needle, k, KnnConfig { ... })`.
@@ -99,6 +117,7 @@ impl<'a, D, V> IntoKnnConfig<'a, D, V> for () {
             include_inactive: false,
             min_radius: None,
             max_radius: None,
+            epsilon: 0.0,
         }
     }
 }
@@ -113,6 +132,7 @@ where
             include_inactive: self.include_inactive,
             min_radius: self.min_radius,
             max_radius: self.max_radius,
+            epsilon: self.epsilon,
         }
     }
 }
@@ -130,6 +150,7 @@ where
             include_inactive: self.include_inactive,
             min_radius: self.min_radius,
             max_radius: self.max_radius,
+            epsilon: self.epsilon,
         }
     }
 }
@@ -164,6 +185,7 @@ pub struct SearchConfig<D, F = NoFilter> {
     pub min_radius: D,
     pub max_radius: D,
     pub is_active: Option<F>,
+    pub epsilon: f64,
 }
 
 impl<D> SearchConfig<D, NoFilter> {
@@ -172,6 +194,7 @@ impl<D> SearchConfig<D, NoFilter> {
             min_radius,
             max_radius,
             is_active: None,
+            epsilon: 0.0,
         }
     }
 }
@@ -182,7 +205,18 @@ impl<D, F> SearchConfig<D, F> {
             min_radius: self.min_radius,
             max_radius: self.max_radius,
             is_active: Some(is_active),
+            epsilon: self.epsilon,
         }
+    }
+
+    pub fn identity<T: Hash>(mut self, identity: &T) -> Self {
+        self.epsilon = epsilon_from_hash(identity_hash(identity));
+        self
+    }
+
+    pub fn epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = epsilon;
+        self
     }
 }
 
@@ -191,6 +225,7 @@ pub struct SearchConfigResolved<'a, D, V> {
     pub min_radius: D,
     pub max_radius: D,
     pub is_active: Option<Box<dyn Fn(EntryId, &V) -> bool + 'a>>,
+    pub epsilon: f64,
 }
 
 pub trait IntoSearchConfig<'a, D, V> {
@@ -206,6 +241,7 @@ where
             min_radius: self.min_radius,
             max_radius: self.max_radius,
             is_active: None,
+            epsilon: self.epsilon,
         }
     }
 }
@@ -222,6 +258,7 @@ where
             is_active: self
                 .is_active
                 .map(|f| Box::new(f) as Box<dyn Fn(EntryId, &V) -> bool + 'a>),
+            epsilon: self.epsilon,
         }
     }
 }
@@ -230,6 +267,7 @@ where
 pub struct RangeSearchConfig<D, F = NoFilter> {
     pub radius: D,
     pub is_active: Option<F>,
+    pub epsilon: f64,
 }
 
 impl<D> RangeSearchConfig<D, NoFilter> {
@@ -237,6 +275,7 @@ impl<D> RangeSearchConfig<D, NoFilter> {
         Self {
             radius,
             is_active: None,
+            epsilon: 0.0,
         }
     }
 }
@@ -246,7 +285,18 @@ impl<D, F> RangeSearchConfig<D, F> {
         RangeSearchConfig {
             radius: self.radius,
             is_active: Some(is_active),
+            epsilon: self.epsilon,
         }
+    }
+
+    pub fn identity<T: Hash>(mut self, identity: &T) -> Self {
+        self.epsilon = epsilon_from_hash(identity_hash(identity));
+        self
+    }
+
+    pub fn epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = epsilon;
+        self
     }
 }
 
@@ -254,6 +304,7 @@ impl<D, F> RangeSearchConfig<D, F> {
 pub struct RangeSearchConfigResolved<'a, D, V> {
     pub radius: D,
     pub is_active: Option<Box<dyn Fn(EntryId, &V) -> bool + 'a>>,
+    pub epsilon: f64,
 }
 
 pub trait IntoRangeSearchConfig<'a, D, V> {
@@ -268,6 +319,7 @@ where
         RangeSearchConfigResolved {
             radius: self.radius,
             is_active: None,
+            epsilon: self.epsilon,
         }
     }
 }
@@ -283,6 +335,7 @@ where
             is_active: self
                 .is_active
                 .map(|f| Box::new(f) as Box<dyn Fn(EntryId, &V) -> bool + 'a>),
+            epsilon: self.epsilon,
         }
     }
 }

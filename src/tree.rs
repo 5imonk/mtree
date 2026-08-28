@@ -25,7 +25,7 @@ where
     pub(crate) root: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
     by_id: Vec<Option<Arc<ObjectNode<K, V, S>>>>,
     free_list: Vec<usize>,
-    key_index: HashMap<K, EntryId>,
+    key_index: HashMap<K, HashMap<u64, EntryId>>,
     entry_count: usize,
     pub(crate) distance_fn: Box<dyn Distance<K, Output = D> + Send + Sync>,
     root_mutex: Mutex<()>,
@@ -83,6 +83,48 @@ impl DistanceType for f64 {
     fn sqrt(self) -> Self {
         self.sqrt()
     }
+}
+
+pub(crate) fn dist_value_as_f64<D: DistanceType>(d: D) -> f64 {
+    if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
+        && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
+    {
+        unsafe { std::mem::transmute_copy(&d) }
+    } else {
+        0.0
+    }
+}
+
+pub(crate) fn dist_value_from_f64<D: DistanceType>(x: f64) -> D {
+    if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
+        && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
+    {
+        unsafe { std::mem::transmute_copy(&x) }
+    } else {
+        D::zero()
+    }
+}
+
+/// Erweiterte Metrik `d(K,K) + |εa − εb|`.
+pub(crate) fn metric_distance<K, D: DistanceType>(
+    distance_fn: &dyn Distance<K, Output = D>,
+    a: &K,
+    eps_a: f64,
+    b: &K,
+    eps_b: f64,
+) -> D {
+    let base = dist_value_as_f64(distance_fn.distance(a, b));
+    dist_value_from_f64(base + (eps_a - eps_b).abs())
+}
+
+pub(crate) fn metric_f64<K, D: DistanceType>(
+    distance_fn: &dyn Distance<K, Output = D>,
+    a: &K,
+    eps_a: f64,
+    b: &K,
+    eps_b: f64,
+) -> f64 {
+    dist_value_as_f64(metric_distance(distance_fn, a, eps_a, b, eps_b))
 }
 
 // f64 implementiert bereits Into<f64> und From<f64> implizit
@@ -295,25 +337,83 @@ where
         self.entry_count -= 1;
     }
 
-    /// Fügt einen Eintrag in den Baum ein.
+    fn metric(&self, a: &K, eps_a: f64, b: &K, eps_b: f64) -> D {
+        metric_distance(self.distance_fn.as_ref(), a, eps_a, b, eps_b)
+    }
+
+    fn index_try_insert(&mut self, key: K, identity_hash: u64, id: EntryId) -> Result<(), DuplicateKey> {
+        let inner = self.key_index.entry(key).or_insert_with(HashMap::new);
+        if inner.contains_key(&identity_hash) {
+            return Err(DuplicateKey);
+        }
+        inner.insert(identity_hash, id);
+        Ok(())
+    }
+
+    fn index_remove(&mut self, key: &K, identity_hash: u64) {
+        if let Some(inner) = self.key_index.get_mut(key) {
+            inner.remove(&identity_hash);
+            if inner.is_empty() {
+                self.key_index.remove(key);
+            }
+        }
+    }
+
+    /// Fügt einen Eintrag in den Baum ein (Identity-Hash `0`, `ε = 0`).
     pub fn insert(&mut self, key: K, value: V) -> Result<EntryId, DuplicateKey> {
-        if self.key_index.contains_key(&key) {
+        self.insert_with_identity_hash(key, value, 0)
+    }
+
+    /// Insert mit Identitätsquelle (Index, Timestamp, …). Gleiche Koordinaten sind erlaubt,
+    /// solange die gehashte Quelle verschieden ist.
+    pub fn insert_with_identity<I: Hash>(
+        &mut self,
+        key: K,
+        value: V,
+        identity: &I,
+    ) -> Result<EntryId, DuplicateKey> {
+        self.insert_with_identity_hash(key, value, crate::distance::identity_hash(identity))
+    }
+
+    fn insert_with_identity_hash(
+        &mut self,
+        key: K,
+        value: V,
+        identity_hash: u64,
+    ) -> Result<EntryId, DuplicateKey> {
+        if self
+            .key_index
+            .get(&key)
+            .map(|inner| inner.contains_key(&identity_hash))
+            .unwrap_or(false)
+        {
             return Err(DuplicateKey);
         }
 
+        let epsilon = crate::distance::epsilon_from_hash(identity_hash);
         let id = self.alloc_slot();
-        let entry = Arc::new(ObjectNode::new(id, key.clone(), value));
+        let entry = Arc::new(ObjectNode::with_identity(
+            id,
+            key.clone(),
+            value,
+            identity_hash,
+            epsilon,
+        ));
+
+        if self.index_try_insert(key.clone(), identity_hash, id).is_err() {
+            self.free_list.push(id.index());
+            return Err(DuplicateKey);
+        }
+        self.entry_count += 1;
 
         let _lock = self.root_mutex.lock().unwrap();
         self.by_id[id.index()] = Some(entry.clone());
-        self.key_index.insert(key.clone(), id);
-        self.entry_count += 1;
 
         if let Some(root) = self.root.clone() {
             drop(_lock);
             self.tree_insert(entry, root);
         } else {
-            let new_root = RoutingNode::with_key(key.clone(), true);
+            let new_root = RoutingNode::with_routing(key.clone(), epsilon, identity_hash, true);
             let root_arc = Arc::new(Mutex::new(new_root));
             entry.set_parent(Some(root_arc.clone()), 0.0);
             {
@@ -346,8 +446,7 @@ where
             let mut node_guard = current.lock().unwrap();
 
             if node_guard.is_leaf {
-                // Füge zu diesem Blatt hinzu
-                let distance = self.distance_fn.distance(&node_guard.key, &key);
+                let distance = self.metric(&node_guard.key, node_guard.epsilon, &key, entry.epsilon());
 
                 // Parent-Referenz und parent_distance setzen
                 // Da Arc nicht mut ist, müssen wir parent später setzen oder eine andere Lösung finden
@@ -393,7 +492,12 @@ where
                 for child in &node_guard.children {
                     if let NodePtr::Routing(ref routing_child) = child {
                         let child_guard = routing_child.lock().unwrap();
-                        let dist = self.distance_fn.distance(&child_guard.key, &key);
+                        let dist = self.metric(
+                            &child_guard.key,
+                            child_guard.epsilon,
+                            &key,
+                            entry.epsilon(),
+                        );
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
                             && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
                         {
@@ -571,12 +675,18 @@ where
 
             if let Some(ref parent_arc) = parent {
                 let parent_guard = parent_arc.lock().unwrap();
-                let dist1 = self
-                    .distance_fn
-                    .distance(&parent_guard.key, &node1_guard.key);
-                let dist2 = self
-                    .distance_fn
-                    .distance(&parent_guard.key, &node2_guard.key);
+                let dist1 = self.metric(
+                    &parent_guard.key,
+                    parent_guard.epsilon,
+                    &node1_guard.key,
+                    node1_guard.epsilon,
+                );
+                let dist2 = self.metric(
+                    &parent_guard.key,
+                    parent_guard.epsilon,
+                    &node2_guard.key,
+                    node2_guard.epsilon,
+                );
                 node1_guard.parent_distance = if std::mem::size_of::<D>()
                     == std::mem::size_of::<f64>()
                     && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
@@ -653,13 +763,21 @@ where
     ) {
         let mut best_key_1: Option<K> = None;
         let mut best_key_2: Option<K> = None;
+        let mut best_eps_1 = 0.0;
+        let mut best_eps_2 = 0.0;
+        let mut best_id_1 = 0u64;
+        let mut best_id_2 = 0u64;
         let mut best_av_radius = D::infinity();
 
         // Sampling-basierte Promotion
         for _ in 0..self.split_sampling {
-            let (key1, key2) = self.promote(&children);
+            let (key1, eps1, id1, key2, eps2, id2) = self.promote(&children);
             node1.key = key1.clone();
+            node1.epsilon = eps1;
+            node1.identity_hash = id1;
             node2.key = key2.clone();
+            node2.epsilon = eps2;
+            node2.identity_hash = id2;
 
             let estimated_av_radius =
                 self.partition(node1.is_leaf, &children, node1, node2, best_av_radius);
@@ -667,13 +785,21 @@ where
             if estimated_av_radius < best_av_radius {
                 best_key_1 = Some(key1);
                 best_key_2 = Some(key2);
+                best_eps_1 = eps1;
+                best_eps_2 = eps2;
+                best_id_1 = id1;
+                best_id_2 = id2;
                 best_av_radius = estimated_av_radius;
             }
         }
 
         if let (Some(k1), Some(k2)) = (best_key_1, best_key_2) {
             node1.key = k1;
+            node1.epsilon = best_eps_1;
+            node1.identity_hash = best_id_1;
             node2.key = k2;
+            node2.epsilon = best_eps_2;
+            node2.identity_hash = best_id_2;
             self.partition(node1.is_leaf, &children, node1, node2, D::infinity());
 
             // Stats aktualisieren nach Partitionierung
@@ -711,7 +837,7 @@ where
         }
     }
 
-    fn promote(&self, children: &[NodePtr<K, V, S>]) -> (K, K) {
+    fn promote(&self, children: &[NodePtr<K, V, S>]) -> (K, f64, u64, K, f64, u64) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -729,7 +855,14 @@ where
 
         let key1 = children[a_idx].get_key();
         let key2 = children[b_idx].get_key();
-        (key1, key2)
+        (
+            key1,
+            children[a_idx].epsilon(),
+            children[a_idx].identity_hash(),
+            key2,
+            children[b_idx].epsilon(),
+            children[b_idx].identity_hash(),
+        )
     }
 
     fn partition(
@@ -750,8 +883,8 @@ where
         let mut distances: Vec<Child> = Vec::new();
         for (i, child) in from.iter().enumerate() {
             let key = child.get_key();
-            let d1 = self.distance_fn.distance(&to_1.key, &key);
-            let d2 = self.distance_fn.distance(&to_2.key, &key);
+            let d1 = self.metric(&to_1.key, to_1.epsilon, &key, child.epsilon());
+            let d2 = self.metric(&to_2.key, to_2.epsilon, &key, child.epsilon());
             // Für f64 direkt verwenden, sonst konvertieren
             let d1_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() {
                 unsafe { std::mem::transmute_copy(&d1) }
@@ -879,16 +1012,29 @@ where
             None => return false,
         };
         let key = entry.key();
+        let identity_hash = entry.identity_hash();
 
         self.tree_erase(entry);
-        self.key_index.remove(&key);
+        self.index_remove(&key, identity_hash);
         self.release_slot(id);
         true
     }
 
-    /// Entfernt einen Eintrag anhand seines Schlüssels (O(1) Lookup).
+    /// Entfernt den Eintrag zu `key`, falls genau einer mit diesem Key existiert.
+    /// Bei mehreren Identitäten (gleiche Koordinaten) `false` — dann `erase_by_id`
+    /// oder [`erase_by_key_identity`] verwenden.
     pub fn erase_by_key(&mut self, key: &K) -> bool {
         let id = match self.key_index.get(key) {
+            Some(inner) if inner.len() == 1 => *inner.values().next().unwrap(),
+            _ => return false,
+        };
+        self.erase_by_id(id)
+    }
+
+    /// Entfernt den Eintrag zu `key` und Identitätsquelle.
+    pub fn erase_by_key_identity<I: Hash>(&mut self, key: &K, identity: &I) -> bool {
+        let h = crate::distance::identity_hash(identity);
+        let id = match self.key_index.get(key).and_then(|inner| inner.get(&h)) {
             Some(&id) => id,
             None => return false,
         };
@@ -919,12 +1065,17 @@ where
             None => return Err(UpdateKeyError::NotFound),
         };
         let old_key = entry.key();
+        let identity_hash = entry.identity_hash();
 
         if new_key == old_key {
             return Ok(());
         }
 
-        if let Some(&existing) = self.key_index.get(&new_key) {
+        if let Some(&existing) = self
+            .key_index
+            .get(&new_key)
+            .and_then(|inner| inner.get(&identity_hash))
+        {
             if existing != id {
                 return Err(UpdateKeyError::DuplicateKey);
             }
@@ -943,8 +1094,9 @@ where
             .unwrap()
             .0 = new_key.clone();
 
-        self.key_index.remove(&old_key);
-        self.key_index.insert(new_key, id);
+        self.index_remove(&old_key, identity_hash);
+        self.index_try_insert(new_key, identity_hash, id)
+            .map_err(|_| UpdateKeyError::DuplicateKey)?;
 
         let entry = self
             .by_id
@@ -956,7 +1108,12 @@ where
             self.tree_insert(entry, root);
         } else {
             let key = entry.key();
-            let new_root = RoutingNode::with_key(key, true);
+            let new_root = RoutingNode::with_routing(
+                key,
+                entry.epsilon(),
+                entry.identity_hash(),
+                true,
+            );
             let root_arc = Arc::new(Mutex::new(new_root));
             entry.set_parent(Some(root_arc.clone()), 0.0);
             {
@@ -1090,7 +1247,7 @@ where
 
             let node_key = {
                 let node_guard = node.lock().unwrap();
-                node_guard.key.clone()
+                (node_guard.key.clone(), node_guard.epsilon)
             };
 
             for child in &parent_guard.children {
@@ -1100,7 +1257,12 @@ where
                     }
 
                     let sibling_guard = sibling.lock().unwrap();
-                    let dist = self.distance_fn.distance(&node_key, &sibling_guard.key);
+                    let dist = self.metric(
+                        &node_key.0,
+                        node_key.1,
+                        &sibling_guard.key,
+                        sibling_guard.epsilon,
+                    );
 
                     if sibling_guard.children.len() > self.min_node_size {
                         if dist < nearest_donor_distance {
@@ -1139,9 +1301,9 @@ where
         to: Arc<Mutex<RoutingNode<K, V, S>>>,
     ) {
         // C++ Referenz: donateChild()
-        let (to_key, is_leaf) = {
+        let (to_key, to_eps, is_leaf) = {
             let to_guard = to.lock().unwrap();
-            (to_guard.key.clone(), to_guard.is_leaf)
+            (to_guard.key.clone(), to_guard.epsilon, to_guard.is_leaf)
         };
 
         // Finde nächsten Grandchild zu to
@@ -1152,7 +1314,7 @@ where
 
             for (i, grandchild) in from_guard.children.iter().enumerate() {
                 let grandchild_key = grandchild.get_key();
-                let dist = self.distance_fn.distance(&to_key, &grandchild_key);
+                let dist = self.metric(&to_key, to_eps, &grandchild_key, grandchild.epsilon());
                 if dist < best_dist {
                     best_dist = dist;
                     best_idx = i;
@@ -1277,7 +1439,7 @@ where
         from_to_distance: f64,
     ) {
         // C++ Referenz: mergeRoutingNodes()
-        let (is_leaf, from_covering_radius, to_covering_radius, to_key) = {
+        let (is_leaf, from_covering_radius, to_covering_radius, to_key, to_eps) = {
             let from_guard = from.lock().unwrap();
             let to_guard = to.lock().unwrap();
             (
@@ -1285,6 +1447,7 @@ where
                 from_guard.covering_radius,
                 to_guard.covering_radius,
                 to_guard.key.clone(),
+                to_guard.epsilon,
             )
         };
 
@@ -1307,7 +1470,7 @@ where
         for mut child in children_to_move {
             // Berechne neue parent_distance
             let child_key = child.get_key();
-            let new_parent_distance = self.distance_fn.distance(&to_key, &child_key);
+            let new_parent_distance = self.metric(&to_key, to_eps, &child_key, child.epsilon());
             let new_parent_distance_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
                 && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
             {

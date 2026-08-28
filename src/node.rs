@@ -22,6 +22,8 @@ where
 {
     pub id: EntryId,
     pub value: RwLock<(K, V)>,
+    identity_hash: u64,
+    epsilon: f64,
     parent: Mutex<Option<Arc<Mutex<RoutingNode<K, V, S>>>>>,
     parent_distance: Mutex<f64>,
 }
@@ -34,9 +36,15 @@ where
     S: crate::stats::NodeStats<K, V> + Default,
 {
     pub fn new(id: EntryId, key: K, value: V) -> Self {
+        Self::with_identity(id, key, value, 0, 0.0)
+    }
+
+    pub fn with_identity(id: EntryId, key: K, value: V, identity_hash: u64, epsilon: f64) -> Self {
         Self {
             id,
             value: RwLock::new((key, value)),
+            identity_hash,
+            epsilon,
             parent: Mutex::new(None),
             parent_distance: Mutex::new(0.0),
         }
@@ -77,6 +85,14 @@ where
     {
         self.value.read().unwrap().1.clone()
     }
+
+    pub fn epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    pub fn identity_hash(&self) -> u64 {
+        self.identity_hash
+    }
 }
 
 /// RoutingNode ist ein innerer Knoten im Baum
@@ -87,6 +103,8 @@ where
     pub children: Vec<NodePtr<K, V, S>>,
     pub is_leaf: bool,
     pub key: K,
+    pub epsilon: f64,
+    pub identity_hash: u64,
     pub stats: S,
     pub covering_radius: f64,
     pub furthest_descendant: Option<*const ObjectNode<K, V, S>>,
@@ -107,6 +125,8 @@ where
             children: Vec::new(),
             is_leaf,
             key: K::default(),
+            epsilon: 0.0,
+            identity_hash: 0,
             stats: S::default(),
             covering_radius: 0.0,
             furthest_descendant: None,
@@ -116,10 +136,16 @@ where
     }
     
     pub fn with_key(key: K, is_leaf: bool) -> Self {
+        Self::with_routing(key, 0.0, 0, is_leaf)
+    }
+
+    pub fn with_routing(key: K, epsilon: f64, identity_hash: u64, is_leaf: bool) -> Self {
         Self {
             children: Vec::new(),
             is_leaf,
             key,
+            epsilon,
+            identity_hash,
             stats: S::default(),
             covering_radius: 0.0,
             furthest_descendant: None,
@@ -181,6 +207,20 @@ where
                 let node = node.lock().unwrap();
                 node.key.clone()
             }
+        }
+    }
+
+    pub fn epsilon(&self) -> f64 {
+        match self {
+            NodePtr::Object(node) => node.epsilon(),
+            NodePtr::Routing(node) => node.lock().unwrap().epsilon,
+        }
+    }
+
+    pub fn identity_hash(&self) -> u64 {
+        match self {
+            NodePtr::Object(node) => node.identity_hash(),
+            NodePtr::Routing(node) => node.lock().unwrap().identity_hash,
         }
     }
     

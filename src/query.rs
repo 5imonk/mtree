@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::BinaryHeap;
 use crate::node::{ObjectNode, RoutingNode, NodePtr};
 use crate::stats::NodeStats;
-use crate::tree::DistanceType;
+use crate::tree::{metric_distance, metric_f64, DistanceType};
 
 /// Queue-Eintrag für Query-Traversierung
 struct QueueEntry<K, V, S>
@@ -59,6 +59,7 @@ where
     S: NodeStats<K, V>,
 {
     needle: K,
+    needle_eps: f64,
     min_radius: D,
     max_radius: D,
     queue: BinaryHeap<QueueEntry<K, V, S>>,
@@ -78,6 +79,7 @@ where
     pub fn empty() -> Self {
         Self {
             needle: unsafe { std::mem::zeroed() },
+            needle_eps: 0.0,
             min_radius: D::zero(),
             max_radius: D::zero(),
             queue: BinaryHeap::new(),
@@ -91,6 +93,7 @@ where
     
     pub fn new(
         needle: K,
+        needle_eps: f64,
         min_radius: D,
         max_radius: D,
         root: Arc<Mutex<RoutingNode<K, V, S>>>,
@@ -99,12 +102,13 @@ where
         let mut queue: BinaryHeap<QueueEntry<K, V, S>> = BinaryHeap::new();
         let root_distance = {
             let root_guard = root.lock().unwrap();
-            let dist = distance_fn.distance(&root_guard.key, &needle);
-            if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                unsafe { std::mem::transmute_copy(&dist) }
-            } else {
-                0.0
-            }
+            metric_f64(
+                distance_fn.as_ref(),
+                &root_guard.key,
+                root_guard.epsilon,
+                &needle,
+                needle_eps,
+            )
         };
         queue.push(QueueEntry {
             node: root,
@@ -113,6 +117,7 @@ where
         });
         Self {
             needle,
+            needle_eps,
             min_radius,
             max_radius,
             queue,
@@ -146,12 +151,13 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
-                    let dist = distance_fn.distance(&child_guard.key, &self.needle);
-                    let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                        unsafe { std::mem::transmute_copy(&dist) }
-                    } else {
-                        0.0
-                    };
+                    let dist_f64 = metric_f64(
+                        distance_fn.as_ref(),
+                        &child_guard.key,
+                        child_guard.epsilon,
+                        &self.needle,
+                        self.needle_eps,
+                    );
                     let distance_bound = dist_f64 + child_guard.covering_radius;
                     
                     let min_radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
@@ -202,7 +208,13 @@ where
                 while self.leaf_iterator < leaf_guard.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf_guard.children[self.leaf_iterator] {
                         let dist = match &self.distance_fn {
-                            Some(df) => df.distance(&obj_node.key(), &self.needle),
+                            Some(df) => metric_distance(
+                                df.as_ref(),
+                                &obj_node.key(),
+                                obj_node.epsilon(),
+                                &self.needle,
+                                self.needle_eps,
+                            ),
                             None => break,
                         };
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
@@ -250,6 +262,7 @@ where
     S: NodeStats<K, V>,
 {
     needle: K,
+    needle_eps: f64,
     radius: D,
     queue: BinaryHeap<QueueEntry<K, V, S>>,
     current_leaf: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
@@ -268,6 +281,7 @@ where
     pub fn empty() -> Self {
         Self {
             needle: unsafe { std::mem::zeroed() },
+            needle_eps: 0.0,
             radius: D::zero(),
             queue: BinaryHeap::new(),
             current_leaf: None,
@@ -280,6 +294,7 @@ where
     
     pub fn new(
         needle: K,
+        needle_eps: f64,
         radius: D,
         root: Arc<Mutex<RoutingNode<K, V, S>>>,
         distance_fn: Box<dyn crate::distance::Distance<K, Output = D> + Send + Sync>,
@@ -287,12 +302,13 @@ where
         let mut queue: BinaryHeap<QueueEntry<K, V, S>> = BinaryHeap::new();
         let root_distance = {
             let root_guard = root.lock().unwrap();
-            let dist = distance_fn.distance(&root_guard.key, &needle);
-            if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                unsafe { std::mem::transmute_copy(&dist) }
-            } else {
-                0.0
-            }
+            metric_f64(
+                distance_fn.as_ref(),
+                &root_guard.key,
+                root_guard.epsilon,
+                &needle,
+                needle_eps,
+            )
         };
         queue.push(QueueEntry {
             node: root,
@@ -301,6 +317,7 @@ where
         });
         Self {
             needle,
+            needle_eps,
             radius,
             queue,
             current_leaf: None,
@@ -333,12 +350,13 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
-                    let dist = distance_fn.distance(&child_guard.key, &self.needle);
-                    let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                        unsafe { std::mem::transmute_copy(&dist) }
-                    } else {
-                        0.0
-                    };
+                    let dist_f64 = metric_f64(
+                        distance_fn.as_ref(),
+                        &child_guard.key,
+                        child_guard.epsilon,
+                        &self.needle,
+                        self.needle_eps,
+                    );
                     let distance_bound = dist_f64 + child_guard.covering_radius;
                     
                     let radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
@@ -381,7 +399,13 @@ where
                 while self.leaf_iterator < leaf_guard.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf_guard.children[self.leaf_iterator] {
                         let dist = match &self.distance_fn {
-                            Some(df) => df.distance(&obj_node.key(), &self.needle),
+                            Some(df) => metric_distance(
+                                df.as_ref(),
+                                &obj_node.key(),
+                                obj_node.epsilon(),
+                                &self.needle,
+                                self.needle_eps,
+                            ),
                             None => break,
                         };
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {

@@ -23,4 +23,4 @@ pub use tree::MTree;
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;
 pub use placeholder_queue::PlaceholderQueue;
-pub use distance::{AsCoordinates, Point};
+pub use distance::{AsCoordinates, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
