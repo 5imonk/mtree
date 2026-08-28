@@ -108,7 +108,7 @@ where
     D: DistanceType,
     S: NodeStats<K, V> + Default,
 {
-    /// Interne Annulus-Query (`min ≤ dist < max`), ohne Filter.
+    /// Interne Annulus-Query (`min < dist ≤ max`), ohne Filter.
     pub(crate) fn query_annulus(
         &self,
         needle: &K,
@@ -142,7 +142,7 @@ where
         }
     }
 
-    /// Bereichssuche (Annulus): `min_radius ≤ dist < max_radius`, optional gefiltert.
+    /// Bereichssuche (Annulus): `min_radius < dist ≤ max_radius`, optional gefiltert.
     pub fn search<'a>(
         &'a self,
         needle: &K,
@@ -423,7 +423,7 @@ where
         results.into_iter().take(k).collect()
     }
 
-    /// k-NN im Annulus: die k nächsten Punkte mit `min_radius ≤ dist < max_radius`.
+    /// k-NN im Annulus: die k nächsten Punkte mit `min_radius < dist ≤ max_radius`.
     pub(crate) fn knn_search_range(
         &self,
         needle: &K,
@@ -479,7 +479,7 @@ where
                     distance_fn.as_ref(),
                     &prune_cell,
                     |obj, dist| {
-                        if dist < min_r || dist >= max_r {
+                        if dist <= min_r || dist > max_r {
                             return;
                         }
                         let kth = if best.len() >= k {
@@ -522,7 +522,7 @@ where
                     };
                     results.retain(|(_, dist)| {
                         let within_k = best.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-                        *dist >= min_r && *dist < max_r && within_k
+                        *dist > min_r && *dist <= max_r && within_k
                     });
                     results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
                     return results.into_iter().take(k).collect();
@@ -582,7 +582,7 @@ where
                         } else {
                             dist_as_f64(distance_fn.distance(&obj_node.key(), needle))
                         };
-                        if dist < min_r || dist >= max_r {
+                        if dist <= min_r || dist > max_r {
                             continue;
                         }
                         if dist > effective_max_relaxed {
@@ -635,7 +635,7 @@ where
 
         results.retain(|(_, dist)| {
             let within_k = best.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-            *dist >= min_r && *dist < max_r && within_k
+            *dist > min_r && *dist <= max_r && within_k
         });
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
         results.into_iter().take(k).collect()
@@ -659,7 +659,7 @@ where
         retain_exclude_self(&mut all, from);
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);
-            dist >= min_r && dist < max_r
+            dist > min_r && dist <= max_r
         });
         all.sort_by(|a, b| {
             dist_as_f64(a.1)

@@ -167,7 +167,7 @@ where
                     let min_prune = min_radius_f64 * crate::tree::LOWER_BOUND_FACTOR;
                     let max_prune = max_radius_f64 * crate::tree::UPPER_BOUND_FACTOR;
                     let lower_bound = (dist_f64 - child_guard.covering_radius).max(0.0);
-                    // Annulus [min, max): Subtree kann schneiden wenn upper ≥ min und lower < max
+                    // Annulus (min, max]: Subtree kann schneiden wenn upper > min und lower <= max
                     if distance_bound >= min_prune && lower_bound < max_prune {
                         self.queue.push(QueueEntry {
                             node: routing_child.clone(),
@@ -224,7 +224,7 @@ where
                         
                         self.leaf_iterator += 1;
                         
-                        if dist_f64 >= min_radius_f64 && dist_f64 < max_radius_f64 {
+                        if dist_f64 > min_radius_f64 && dist_f64 <= max_radius_f64 {
                             return Some((obj_node.clone(), dist));
                         }
                     } else {

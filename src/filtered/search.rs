@@ -320,7 +320,7 @@ where
         out
     }
 
-    /// k-NN im Annulus mit Predicate: `min_radius ≤ dist < max_radius`, bis `k` Aktive.
+    /// k-NN im Annulus mit Predicate: `min_radius < dist ≤ max_radius`, bis `k` Aktive.
     pub(crate) fn knn_search_range_filtered(
         &self,
         needle: &K,
@@ -391,7 +391,7 @@ where
              effective_max_relaxed: f64,
              active_distances: &mut BinaryHeap<KnnDistanceKey>,
              results: &mut Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)>| {
-                if dist < min_r || dist >= max_r {
+                if dist <= min_r || dist > max_r {
                     return;
                 }
                 if dist > effective_max_relaxed {
@@ -584,7 +584,7 @@ where
         }
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);
-            dist >= min_r && dist < max_r
+            dist > min_r && dist <= max_r
         });
         all.sort_by(|a, b| {
             dist_as_f64(a.1)
@@ -689,7 +689,7 @@ where
 
     results.retain(|(_, dist, _)| {
         let within_k = active_distances.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-        *dist >= min_r && *dist < max_r && within_k
+        *dist > min_r && *dist <= max_r && within_k
     });
     results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
