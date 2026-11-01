@@ -28,15 +28,23 @@ fn new_tree() -> MTree<(i64, i64), String> {
     MTree::with_params(5, 100, 20, Euclid2d)
 }
 
-/// Deterministic data: n points in [-1000, 1000]^2
+/// Deterministic data: n unique points in [-10_000, 10_000)^2
 fn gen_data(n: usize, seed: u64) -> Vec<((i64, i64), String)> {
     let mut rng = StdRng::seed_from_u64(seed);
-    (0..n)
-        .map(|i| {
-            let k = (rng.gen_range(-1000..1000), rng.gen_range(-1000..1000));
-            (k, format!("v{}", i))
-        })
-        .collect()
+    let mut seen = std::collections::HashSet::with_capacity(n);
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while out.len() < n {
+        let k = (
+            rng.gen_range(-10_000..10_000),
+            rng.gen_range(-10_000..10_000),
+        );
+        if seen.insert(k) {
+            out.push((k, format!("v{}", i)));
+            i += 1;
+        }
+    }
+    out
 }
 
 // ---- Naive implementations ----
