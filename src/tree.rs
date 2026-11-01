@@ -205,6 +205,19 @@ where
     }
 }
 
+/// Empfohlene Knotenparameter `(min_node_size, max_node_size, split_sampling)`
+/// für einen Baum mit etwa `expected_entries` Einträgen.
+///
+/// Heuristik: `max ≈ √n` (geclampt auf 8…100), `min = max(2, max/4)`,
+/// `split = clamp(max/4, 5, 20)`. Bei `expected_entries == 0` wie `n = 1`.
+pub fn node_params_for_capacity(expected_entries: usize) -> (usize, usize, usize) {
+    let n = expected_entries.max(1);
+    let max = ((n as f64).sqrt().round() as usize).clamp(8, 100);
+    let min = (max / 4).max(2);
+    let split = (max / 4).clamp(5, 20);
+    (min, max, split)
+}
+
 impl<K, V> MTree<K, V, f64>
 where
     K: Clone + Send + Sync + Hash + Eq,
@@ -251,6 +264,18 @@ where
             distance_fn: Box::new(distance_fn),
             root_mutex: Mutex::new(()),
         }
+    }
+
+    /// Wie [`with_params`], mit Knotengrößen aus [`node_params_for_capacity`].
+    ///
+    /// `expected_entries` ist ein Hinweis auf die geplante Datenmenge; die
+    /// Parameter bleiben danach fest (kein automatisches Nachskalieren).
+    pub fn with_capacity_hint<F>(expected_entries: usize, distance_fn: F) -> Self
+    where
+        F: Distance<K, Output = f64> + Send + Sync + 'static,
+    {
+        let (min, max, split) = node_params_for_capacity(expected_entries);
+        Self::with_params(min, max, split, distance_fn)
     }
 }
 
