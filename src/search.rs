@@ -24,18 +24,40 @@ use std::collections::BinaryHeap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
-/// Kontext für k-NN, wenn die Needle ein gespeicherter Eintrag ist.
-pub(crate) struct KnnFromEntry<K, V, S>
+/// Wie der Seed in der k-NN-Traversierung behandelt wird.
+pub(crate) enum KnnSeedMode {
+    /// Needle = gespeicherter Eintrag; Distanz 0, optional Self ausschließen.
+    FromEntry { include_self: bool },
+    /// Beliebige Needle; Seed nur Pruning-Hint mit echter Distanz.
+    Hint,
+}
+
+/// Seed-Kontext: Leaf zuerst besuchen (FromEntry oder Hint).
+pub(crate) struct KnnSeedCtx<K, V, S>
 where
     S: NodeStats<K, V>,
 {
     pub id: EntryId,
-    pub include_self: bool,
     pub leaf: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
+    pub mode: KnnSeedMode,
+}
+
+impl<K, V, S> KnnSeedCtx<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    pub(crate) fn exclude_self(&self) -> bool {
+        matches!(self.mode, KnnSeedMode::FromEntry { include_self: false })
+    }
+
+    /// Distanz 0 nur im FromEntry-Modus (Needle-Key = Seed-Key).
+    pub(crate) fn zero_dist_for(&self, id: EntryId) -> bool {
+        id == self.id && matches!(self.mode, KnnSeedMode::FromEntry { .. })
+    }
 }
 
 pub(crate) fn is_seeded_leaf<K, V, S>(
-    from: Option<&KnnFromEntry<K, V, S>>,
+    from: Option<&KnnSeedCtx<K, V, S>>,
     node: &Arc<Mutex<RoutingNode<K, V, S>>>,
 ) -> bool
 where
@@ -46,12 +68,12 @@ where
         .unwrap_or(false)
 }
 
-/// Leaf des Query-Eintrags zuerst bewerten: Self optional mit Distanz 0.
+/// Seed-Leaf zuerst bewerten: FromEntry mit Distanz 0, Hint mit echter Distanz.
 pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
     leaf: &RoutingNode<K, V, S>,
     needle: &K,
     needle_eps: f64,
-    from: &KnnFromEntry<K, V, S>,
+    from: &KnnSeedCtx<K, V, S>,
     distance_fn: &dyn Distance<K, Output = D>,
     pruning_radius: &Cell<f64>,
     mut on_object: impl FnMut(Arc<ObjectNode<K, V, S>>, f64),
@@ -64,8 +86,20 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
     for child in &leaf.children {
         if let NodePtr::Object(obj) = child {
             if obj.id == from.id {
-                if from.include_self {
-                    on_object(obj.clone(), 0.0);
+                match from.mode {
+                    KnnSeedMode::FromEntry { include_self } => {
+                        if include_self {
+                            on_object(obj.clone(), 0.0);
+                        }
+                    }
+                    KnnSeedMode::Hint => {
+                        let pr = pruning_radius.get();
+                        let dist =
+                            metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps);
+                        if !(pr.is_finite() && dist > pr * UPPER_BOUND_FACTOR) {
+                            on_object(obj.clone(), dist);
+                        }
+                    }
                 }
                 continue;
             }
@@ -81,12 +115,12 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
 
 fn retain_exclude_self<K, V, S, D>(
     results: &mut Vec<(Arc<ObjectNode<K, V, S>>, D)>,
-    from: Option<&KnnFromEntry<K, V, S>>,
+    from: Option<&KnnSeedCtx<K, V, S>>,
 ) where
     S: NodeStats<K, V>,
 {
     if let Some(from) = from {
-        if !from.include_self {
+        if from.exclude_self() {
             results.retain(|(n, _)| n.id != from.id);
         }
     }
@@ -180,7 +214,8 @@ where
     /// k-Nearest-Neighbor-Suche.
     ///
     /// `config` kann `()`, `None` oder [`KnnConfig`](crate::search_config::KnnConfig) sein:
-    /// optional Filter, `include_inactive`, sowie Annulus `min_radius`/`max_radius`.
+    /// optional Filter, `include_inactive`, Annulus `min_radius`/`max_radius`, sowie
+    /// `.seed(EntryId)` als Pruning-Hint.
     pub fn knn_search<'a>(
         &'a self,
         needle: &K,
@@ -188,7 +223,14 @@ where
         config: impl IntoKnnConfig<'a, D, V>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let cfg = config.into_knn_config();
-        self.knn_search_dispatch(needle, cfg.epsilon, k, cfg, None)
+        let seed_ctx = cfg.seed.and_then(|id| {
+            self.get(id).map(|obj| KnnSeedCtx {
+                id,
+                leaf: obj.parent(),
+                mode: KnnSeedMode::Hint,
+            })
+        });
+        self.knn_search_dispatch(needle, cfg.epsilon, k, cfg, seed_ctx.as_ref())
     }
 
     /// k-NN mit einem gespeicherten Eintrag als Query.
@@ -210,10 +252,10 @@ where
         }
         let key = obj.key();
         let needle_eps = obj.epsilon();
-        let ctx = KnnFromEntry {
+        let ctx = KnnSeedCtx {
             id,
-            include_self,
             leaf: obj.parent(),
+            mode: KnnSeedMode::FromEntry { include_self },
         };
         let cfg = config.into_knn_config();
         Some(self.knn_search_dispatch(&key, needle_eps, k, cfg, Some(&ctx)))
@@ -225,7 +267,7 @@ where
         needle_eps: f64,
         k: usize,
         cfg: KnnConfigResolved<'_, D, V>,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let has_annulus = cfg.min_radius.is_some() || cfg.max_radius.is_some();
         let min_r = cfg.min_radius.unwrap_or_else(D::zero);
@@ -261,7 +303,7 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -284,7 +326,7 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
@@ -369,11 +411,12 @@ where
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
                         if let Some(ctx) = from {
-                            if obj_node.id == ctx.id && !ctx.include_self {
+                            if ctx.exclude_self() && obj_node.id == ctx.id {
                                 continue;
                             }
                         }
-                        let dist = if from.map(|c| c.id == obj_node.id).unwrap_or(false) {
+                        let dist = if from.map(|c| c.zero_dist_for(obj_node.id)).unwrap_or(false)
+                        {
                             0.0
                         } else {
                             metric_f64(
@@ -439,7 +482,7 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
         let mut results: Vec<_> = self.query_ball(needle, needle_eps, max_radius).collect();
@@ -460,7 +503,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -485,7 +528,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -611,11 +654,12 @@ where
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
                         if let Some(ctx) = from {
-                            if obj_node.id == ctx.id && !ctx.include_self {
+                            if ctx.exclude_self() && obj_node.id == ctx.id {
                                 continue;
                             }
                         }
-                        let dist = if from.map(|c| c.id == obj_node.id).unwrap_or(false) {
+                        let dist = if from.map(|c| c.zero_dist_for(obj_node.id)).unwrap_or(false)
+                        {
                             0.0
                         } else {
                             metric_f64(
@@ -698,7 +742,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);

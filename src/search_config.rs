@@ -31,6 +31,7 @@ pub struct NoFilter;
 ///
 /// - `min_radius` / `max_radius`: Annulus `min < dist ≤ max` (`None` → 0 bzw. ∞)
 /// - `is_active`: optionaler Filter; `include_inactive` nur wirksam wenn `is_active` gesetzt
+/// - `seed`: optionaler naher Eintrag als Pruning-Hint (ungültige ID wird ignoriert)
 pub struct KnnConfig<D, F = NoFilter> {
     pub is_active: Option<F>,
     pub include_inactive: bool,
@@ -38,6 +39,8 @@ pub struct KnnConfig<D, F = NoFilter> {
     pub max_radius: Option<D>,
     /// Needle-ε (Default 0). Setzen über [`KnnConfig::identity`] oder [`KnnConfig::epsilon`].
     pub epsilon: f64,
+    /// Optionaler Pruning-Hint: Leaf dieses Eintrags zuerst besuchen.
+    pub seed: Option<EntryId>,
 }
 
 impl<D: DistanceType> KnnConfig<D, NoFilter> {
@@ -48,6 +51,7 @@ impl<D: DistanceType> KnnConfig<D, NoFilter> {
             min_radius: None,
             max_radius: None,
             epsilon: 0.0,
+            seed: None,
         }
     }
 }
@@ -66,6 +70,7 @@ impl<D, F> KnnConfig<D, F> {
             min_radius: self.min_radius,
             max_radius: self.max_radius,
             epsilon: self.epsilon,
+            seed: self.seed,
         }
     }
 
@@ -94,6 +99,12 @@ impl<D, F> KnnConfig<D, F> {
         self.epsilon = epsilon;
         self
     }
+
+    /// Naher Eintrag als Pruning-Hint (Leaf zuerst); ungültige ID = kein Seed.
+    pub fn seed(mut self, id: EntryId) -> Self {
+        self.seed = Some(id);
+        self
+    }
 }
 
 /// Aufgelöstes k-NN-Config (intern / Trait-Objekt für Filter).
@@ -103,6 +114,7 @@ pub struct KnnConfigResolved<'a, D, V> {
     pub min_radius: Option<D>,
     pub max_radius: Option<D>,
     pub epsilon: f64,
+    pub seed: Option<EntryId>,
 }
 
 /// Ermöglicht `knn_search(needle, k, ())` und `knn_search(needle, k, KnnConfig { ... })`.
@@ -118,6 +130,7 @@ impl<'a, D, V> IntoKnnConfig<'a, D, V> for () {
             min_radius: None,
             max_radius: None,
             epsilon: 0.0,
+            seed: None,
         }
     }
 }
@@ -133,6 +146,7 @@ where
             min_radius: self.min_radius,
             max_radius: self.max_radius,
             epsilon: self.epsilon,
+            seed: self.seed,
         }
     }
 }
@@ -151,6 +165,7 @@ where
             min_radius: self.min_radius,
             max_radius: self.max_radius,
             epsilon: self.epsilon,
+            seed: self.seed,
         }
     }
 }

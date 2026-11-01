@@ -260,6 +260,75 @@ mod tests {
     }
 
     #[test]
+    fn test_knn_search_seed_matches_unseeded() {
+        let data = test_data();
+        let mut tree = new_tree_i64();
+        let mut ids = Vec::new();
+        for (k, v) in &data {
+            ids.push(tree.insert(*k, v.clone()).unwrap());
+        }
+
+        let needle = (5, 5);
+        for k in [1usize, 3, 5, 10] {
+            let plain = tree.knn_search(&needle, k, ());
+            for seed in &ids {
+                let seeded = tree.knn_search(&needle, k, KnnConfig::new().seed(*seed));
+                assert_eq!(plain.len(), seeded.len());
+                for (a, b) in plain.iter().zip(seeded.iter()) {
+                    assert_eq!(a.0.id, b.0.id);
+                    assert!((a.1 - b.1).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_knn_search_seed_invalid_and_nearest() {
+        let mut tree = new_tree_i64();
+        let near = tree.insert((1, 0), "near".to_string()).unwrap();
+        let far = tree.insert((100, 0), "far".to_string()).unwrap();
+        tree.insert((2, 0), "mid".to_string()).unwrap();
+        let gone = tree.insert((50, 0), "gone".to_string()).unwrap();
+        assert!(tree.erase_by_id(gone));
+
+        let needle = (0, 0);
+        let plain = tree.knn_search(&needle, 2, ());
+        let bad_seed = tree.knn_search(&needle, 2, KnnConfig::new().seed(gone));
+        assert_eq!(plain.len(), bad_seed.len());
+        for (a, b) in plain.iter().zip(bad_seed.iter()) {
+            assert_eq!(a.0.id, b.0.id);
+            assert!((a.1 - b.1).abs() < 1e-9);
+        }
+
+        let top1 = tree.knn_search(&needle, 1, KnnConfig::new().seed(near));
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].0.id, near);
+
+        let top1_far_seed = tree.knn_search(&needle, 1, KnnConfig::new().seed(far));
+        assert_eq!(top1_far_seed[0].0.id, near);
+    }
+
+    #[test]
+    fn test_knn_search_seed_annulus_excludes_seed() {
+        let mut tree = new_tree_i64();
+        let seed = tree.insert((0, 0), "seed".to_string()).unwrap();
+        tree.insert((2, 0), "in".to_string()).unwrap();
+        tree.insert((5, 0), "out".to_string()).unwrap();
+
+        let hits = tree.knn_search(
+            &(0, 0),
+            5,
+            KnnConfig::new()
+                .seed(seed)
+                .min_radius(1.0)
+                .max_radius(3.0),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.payload(), "in");
+        assert!(hits.iter().all(|(n, _)| n.id != seed));
+    }
+
+    #[test]
     fn test_clear() {
         let mut tree = new_tree_i64();
         tree.insert((1, 2), "a".to_string()).unwrap();

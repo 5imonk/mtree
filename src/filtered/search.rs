@@ -6,7 +6,7 @@
 
 use crate::entry::EntryId;
 use crate::node::{NodePtr, ObjectNode};
-use crate::search::{is_seeded_leaf, visit_seeded_leaf_objects, KnnFromEntry};
+use crate::search::{is_seeded_leaf, visit_seeded_leaf_objects, KnnSeedCtx};
 use crate::stats::NodeStats;
 use crate::tree::{
     metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR, UPPER_BOUND_FACTOR,
@@ -38,18 +38,18 @@ fn push_active_kth(active_distances: &mut BinaryHeap<KnnDistanceKey>, k: usize, 
     }
 }
 
-fn skip_self<K, V, S>(from: Option<&KnnFromEntry<K, V, S>>, id: EntryId) -> bool
+fn skip_self<K, V, S>(from: Option<&KnnSeedCtx<K, V, S>>, id: EntryId) -> bool
 where
     S: NodeStats<K, V>,
 {
-    from.map(|c| c.id == id && !c.include_self).unwrap_or(false)
+    from.map(|c| c.exclude_self() && c.id == id).unwrap_or(false)
 }
 
 fn object_dist<K, V, D, S>(
     obj: &ObjectNode<K, V, S>,
     needle: &K,
     needle_eps: f64,
-    from: Option<&KnnFromEntry<K, V, S>>,
+    from: Option<&KnnSeedCtx<K, V, S>>,
     distance_fn: &dyn crate::distance::Distance<K, Output = D>,
 ) -> f64
 where
@@ -58,7 +58,7 @@ where
     D: DistanceType,
     S: NodeStats<K, V>,
 {
-    if from.map(|c| c.id == obj.id).unwrap_or(false) {
+    if from.map(|c| c.zero_dist_for(obj.id)).unwrap_or(false) {
         0.0
     } else {
         metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps)
@@ -80,7 +80,7 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -112,7 +112,7 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
@@ -286,12 +286,12 @@ where
         k: usize,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
         let mut all: Vec<_> = self.query_ball(needle, needle_eps, max_radius).collect();
         if let Some(from) = from {
-            if !from.include_self {
+            if from.exclude_self() {
                 all.retain(|(n, _)| n.id != from.id);
             }
         }
@@ -348,7 +348,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -392,7 +392,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -604,7 +604,7 @@ where
         max_radius: D,
         is_active: &dyn Fn(EntryId, &V) -> bool,
         include_inactive: bool,
-        from: Option<&KnnFromEntry<K, V, S>>,
+        from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -614,7 +614,7 @@ where
 
         let mut all: Vec<_> = self.query_annulus(needle, needle_eps, min_radius, max_radius).collect();
         if let Some(from) = from {
-            if !from.include_self {
+            if from.exclude_self() {
                 all.retain(|(n, _)| n.id != from.id);
             }
         }

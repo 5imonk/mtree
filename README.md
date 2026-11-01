@@ -61,7 +61,7 @@ Vier öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radius
 
 | Methode | Bedeutung |
 |---------|-----------|
-| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`); mit Radien `min < dist ≤ max` |
+| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`); mit Radien `min < dist ≤ max`; optional `.seed(EntryId)` als Pruning-Hint |
 | `knn_from_entry` | k-NN von einem gespeicherten `EntryId`; `include_self` steuert, ob der Punkt selbst zählt |
 | `search` | Annulus `min_radius < dist ≤ max_radius` (`SearchConfig` Pflicht) |
 | `range_search` | Kugel `dist ≤ radius` (`RangeSearchConfig` Pflicht) |
@@ -71,6 +71,9 @@ use mtree::{KnnConfig, RangeSearchConfig, SearchConfig};
 
 // Plain k-NN
 let nearby = tree.knn_search(&(1, 2), 5, ());
+
+// k-NN mit nahen Eintrag als Pruning-Hint (Ergebnis bleibt exakt)
+let nearby_seeded = tree.knn_search(&(1, 2), 5, KnnConfig::new().seed(id));
 
 // k-NN von einem Eintrag im Baum (optional ohne den Punkt selbst)
 let neighbors = tree.knn_from_entry(id, 5, false, ()).unwrap();
@@ -101,6 +104,7 @@ let in_ball: Vec<_> = tree
 ```
 
 - **`include_inactive`** gilt nur für k-NN: bei gesetztem Filter zählen nur aktive Treffer für `k`; inaktive innerhalb der Distanz des k-ten Aktiven können mitgeliefert werden.
+- **`.seed(EntryId)`** (k-NN): besucht zuerst das Leaf des Hints und setzt den Pruning-Radius früher; ungültige ID wird ignoriert. Ergebnis identisch zu unseeded.
 - Bei `search` / `range_search` bedeutet `is_active: None` (Default) „alle Treffer“, `Some(f)` nur aktive.
 
 ### Key und Value per `EntryId`
