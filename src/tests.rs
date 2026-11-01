@@ -2,6 +2,7 @@
 mod tests {
     use crate::MTree;
     use crate::distance::Distance;
+    use crate::node_params_for_capacity;
     use crate::DuplicateKey;
     use crate::{KnnConfig, RangeSearchConfig, SearchConfig};
     use std::collections::BTreeSet;
@@ -70,6 +71,29 @@ mod tests {
             .collect();
         with_dist.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
         with_dist.into_iter().take(k).collect()
+    }
+
+    #[test]
+    fn test_node_params_for_capacity() {
+        assert_eq!(node_params_for_capacity(0), node_params_for_capacity(1));
+        let (_min, max_100, _split) = node_params_for_capacity(100);
+        assert_eq!(max_100, 10);
+        let (min, max, split) = node_params_for_capacity(100);
+        assert_eq!(min, (max / 4).max(2));
+        assert_eq!(split, (max / 4).clamp(5, 20));
+        let (_, max_big, _) = node_params_for_capacity(1_000_000);
+        assert_eq!(max_big, 100);
+    }
+
+    #[test]
+    fn test_with_capacity_hint_inserts() {
+        let mut tree = MTree::with_capacity_hint(100, Euclid2d);
+        for i in 0..50 {
+            tree.insert((i, 0), format!("v{i}")).unwrap();
+        }
+        assert_eq!(tree.size(), 50);
+        let knn = tree.knn_search(&(0, 0), 3, ());
+        assert_eq!(knn.len(), 3);
     }
 
     #[test]

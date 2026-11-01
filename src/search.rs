@@ -341,6 +341,11 @@ where
 
         if let Some(ctx) = from {
             if let Some(leaf) = &ctx.leaf {
+                #[cfg(feature = "knn_stats")]
+                {
+                    crate::knn_stats::record_routing_visit();
+                    crate::knn_stats::record_leaf_visit();
+                }
                 let leaf_guard = leaf.lock().unwrap();
                 visit_seeded_leaf_objects(
                     &leaf_guard,
@@ -406,8 +411,13 @@ where
                 continue;
             }
 
+            #[cfg(feature = "knn_stats")]
+            crate::knn_stats::record_routing_visit();
+
             let node_guard = entry.node.lock().unwrap();
             if node_guard.is_leaf {
+                #[cfg(feature = "knn_stats")]
+                crate::knn_stats::record_leaf_visit();
                 for child in &node_guard.children {
                     if let NodePtr::Object(ref obj_node) = child {
                         if let Some(ctx) = from {
