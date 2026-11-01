@@ -8,25 +8,13 @@ description = "High-performance M-Tree data structure with SIMD optimizations"
 
 [features]
 default = []
-# Compile-time visit counters for plain k-NN (experiment branch). Zero overhead when off.
+# Compile-time visit counters for plain k-NN. Zero overhead when off.
 knn_stats = []
 
 [lib]
 name = "mtree"
 path = "src/lib.rs"
 
-[[bench]]
-name = "mtree_benches"
-harness = false
-
-[[bench]]
-name = "knn_seed_hint"
-harness = false
-
 [dependencies]
 rayon = "1.8"
 num-traits = "0.2"
-
-[dev-dependencies]
-criterion = "0.5"
-rand = "0.8"
