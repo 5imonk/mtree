@@ -1,0 +1,21 @@
+[package]
+name = "mtree-experiment"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Benchmarks and reports for mtree (depends on local or git main)"
+
+[dependencies]
+mtree = { path = "../mtree", features = ["knn_stats"] }
+rand = "0.8"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "mtree_benches"
+harness = false
+
+[[bench]]
+name = "knn_seed_hint"
+harness = false
