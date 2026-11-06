@@ -8,14 +8,13 @@ use crate::distance::Distance;
 use crate::entry::EntryId;
 use crate::filtered::query::{FilteredQuery, FilteredRangeQuery};
 use crate::node::{NodePtr, ObjectNode, RoutingNode};
-use crate::placeholder_queue::PlaceholderQueue;
 use crate::query::{Query, RangeQuery};
 use crate::search_config::{
     IntoKnnConfig, IntoRangeSearchConfig, IntoSearchConfig, KnnConfigResolved,
 };
 use crate::stats::NodeStats;
 use crate::tree::{
-    metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, KnnTag, MTree, LOWER_BOUND_FACTOR,
+    metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR,
     UPPER_BOUND_FACTOR,
 };
 use std::cell::Cell;
@@ -297,7 +296,7 @@ where
         }
     }
 
-    /// Plain k-NN (PlaceholderQueue + Pruning für D=f64, sonst Fallback)
+    /// Plain k-NN (Pruning über bestätigte Distanzen für D=f64, sonst Fallback)
     pub(crate) fn knn_search_plain(
         &self,
         needle: &K,
@@ -320,7 +319,7 @@ where
         self.knn_search_fallback(needle, needle_eps, k, from)
     }
 
-    /// k-NN mit PlaceholderQueue und dynamischem Pruning (intern, D als f64 verwendet)
+    /// k-NN mit dynamischem Pruning über die k besten bestätigten Distanzen.
     fn knn_search_with_placeholder_queue(
         &self,
         needle: &K,
@@ -331,13 +330,26 @@ where
         let root = self.root.as_ref().unwrap().clone();
         let distance_fn = self.distance_fn.clone_box();
 
-        let compare = |a: &KnnDistanceKey, b: &KnnDistanceKey| a < b;
-        let mut placeholder_queue =
-            PlaceholderQueue::new(k, compare, KnnDistanceKey(f64::INFINITY));
+        // Nur bestätigte Objektdistanzen. Teilbaum-Oberschranken zählen nicht als Nachbar,
+        // sonst fällt der Pruning-Radius unter die echte k-te Distanz.
+        let mut best: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
         let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64)> = Vec::new();
-        let mut subtree_id: usize = 0;
-        let mut object_id: usize = 0;
         let prune_cell = Cell::new(f64::INFINITY);
+        let confirmed_kth = |best: &BinaryHeap<KnnDistanceKey>| -> f64 {
+            if best.len() >= k {
+                best.peek().map(|d| d.0).unwrap_or(f64::INFINITY)
+            } else {
+                f64::INFINITY
+            }
+        };
+        let note = |best: &mut BinaryHeap<KnnDistanceKey>, dist: f64| {
+            if best.len() < k {
+                best.push(KnnDistanceKey(dist));
+            } else if dist < best.peek().map(|d| d.0).unwrap_or(f64::INFINITY) {
+                best.pop();
+                best.push(KnnDistanceKey(dist));
+            }
+        };
 
         if let Some(ctx) = from {
             if let Some(leaf) = &ctx.leaf {
@@ -355,23 +367,11 @@ where
                     distance_fn.as_ref(),
                     &prune_cell,
                     |obj, dist| {
-                        let pruning_radius = if placeholder_queue.len() >= k {
-                            placeholder_queue.get_max_key().0
-                        } else {
-                            f64::INFINITY
-                        };
+                        let pruning_radius = confirmed_kth(&best);
                         if dist <= pruning_radius {
                             results.push((obj, dist));
-                            placeholder_queue.add_placeholder(
-                                KnnTag::Object(object_id),
-                                KnnDistanceKey(dist),
-                                1,
-                                KnnTag::Object(object_id),
-                            );
-                            object_id = object_id.wrapping_add(1);
-                            if placeholder_queue.len() >= k {
-                                prune_cell.set(placeholder_queue.get_max_key().0);
-                            }
+                            note(&mut best, dist);
+                            prune_cell.set(confirmed_kth(&best));
                         }
                     },
                 );
@@ -396,11 +396,7 @@ where
         });
 
         while let Some(entry) = pq.pop() {
-            let pruning_radius = if placeholder_queue.len() >= k {
-                placeholder_queue.get_max_key().0
-            } else {
-                f64::INFINITY
-            };
+            let pruning_radius = confirmed_kth(&best);
             let pruning_radius_relaxed = if pruning_radius.is_finite() {
                 pruning_radius * UPPER_BOUND_FACTOR
             } else {
@@ -439,13 +435,7 @@ where
                         };
                         if dist <= pruning_radius {
                             results.push((obj_node.clone(), dist));
-                            placeholder_queue.add_placeholder(
-                                KnnTag::Object(object_id),
-                                KnnDistanceKey(dist),
-                                1,
-                                KnnTag::Object(object_id),
-                            );
-                            object_id = object_id.wrapping_add(1);
+                            note(&mut best, dist);
                         }
                     }
                 }
@@ -475,9 +465,6 @@ where
                         center_distance: center_dist,
                         distance_bound: upper_bound,
                     });
-                    let tag = KnnTag::Subtree(subtree_id);
-                    placeholder_queue.add_placeholder(tag, KnnDistanceKey(upper_bound), 1, tag);
-                    subtree_id = subtree_id.wrapping_add(1);
                 }
             }
         }
