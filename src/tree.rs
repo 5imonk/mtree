@@ -134,7 +134,7 @@ pub const LOWER_BOUND_FACTOR: f64 = 0.999;
 /// Leicht größere Schranke beim Pruning, um numerische Fehler zu vermeiden (Obergrenze).
 pub const UPPER_BOUND_FACTOR: f64 = 1.001;
 
-/// Wrapper für f64 als Ord-Key (PlaceholderQueue verlangt Key: Ord)
+/// Wrapper für f64 als Ord-Key (der Heap der k besten Distanzen verlangt Key: Ord)
 #[derive(Clone, Copy)]
 pub(crate) struct KnnDistanceKey(pub(crate) f64);
 impl Default for KnnDistanceKey {
@@ -157,13 +157,6 @@ impl Ord for KnnDistanceKey {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
     }
-}
-
-/// Tag für PlaceholderQueue bei k-NN (eindeutig pro Subtree/Objekt)
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum KnnTag {
-    Subtree(usize),
-    Object(usize),
 }
 
 /// Queue-Eintrag für k-NN-Traversierung (min-heap: kleinster distance_bound zuerst)
@@ -473,26 +466,15 @@ where
             if node_guard.is_leaf {
                 let distance = self.metric(&node_guard.key, node_guard.epsilon, &key, entry.epsilon());
 
-                // Parent-Referenz und parent_distance setzen
-                // Da Arc nicht mut ist, müssen wir parent später setzen oder eine andere Lösung finden
-                // Für jetzt: parent wird beim Erstellen gesetzt oder über eine andere Methode
-                // entry.parent wird später aktualisiert wenn möglich
-
-                // Stats aktualisieren
+                // Stats aktualisieren. Vorfahren erst nach dem Guard, damit kein Lock verschachtelt.
+                let ancestor = node_guard.parent.clone();
                 let entry_value = entry.value.read().unwrap();
                 node_guard.stats.add_descendant(&*entry_value);
                 drop(entry_value);
 
-                // Covering-Radius aktualisieren wenn nötig
-                let distance_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                    && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                {
-                    unsafe { std::mem::transmute_copy(&distance) }
-                } else {
-                    0.0
-                };
-
-                if distance_f64 > node_guard.covering_radius {
+                let distance_f64 = dist_value_as_f64(distance);
+                let radius_grew = distance_f64 > node_guard.covering_radius;
+                if radius_grew {
                     node_guard.covering_radius = distance_f64;
                     node_guard.furthest_descendant =
                         Some(entry.as_ref() as *const ObjectNode<K, V, S>);
@@ -505,6 +487,15 @@ where
                 if node_guard.children.len() > self.max_node_size {
                     drop(node_guard);
                     self.split(current.clone());
+                } else if radius_grew {
+                    drop(node_guard);
+                    self.expand_cover_up(current.clone());
+                } else {
+                    drop(node_guard);
+                }
+                if let Some(ancestor) = ancestor {
+                    let entry_value = entry.value.read().unwrap();
+                    self.adjust_ancestors(ancestor, |stats| stats.add_descendant(&*entry_value));
                 }
                 break;
             } else {
@@ -567,22 +558,21 @@ where
                 drop(node_guard);
 
                 if let Some(next) = nearest {
-                    // Aktualisiere covering_radius wenn nötig
+                    // Covering-Radius des gewählten Kindes anheben, dann Vorfahren.
+                    // Guard fällt, bevor expand_cover_up den Parent sperrt.
                     if !within_covering_radius {
-                        let mut next_guard = next.lock().unwrap();
-                        let nearest_dist_f64 = if std::mem::size_of::<D>()
-                            == std::mem::size_of::<f64>()
-                            && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                        {
-                            unsafe { std::mem::transmute_copy(&nearest_distance) }
-                        } else {
-                            0.0
+                        let nearest_dist_f64 = dist_value_as_f64(nearest_distance);
+                        let radius_grew = {
+                            let mut next_guard = next.lock().unwrap();
+                            let grew = nearest_dist_f64 > next_guard.covering_radius;
+                            if grew {
+                                next_guard.covering_radius = nearest_dist_f64;
+                            }
+                            grew
                         };
-                        if nearest_dist_f64 > next_guard.covering_radius {
-                            next_guard.covering_radius = nearest_dist_f64;
-                            // furthest_descendant wird später gesetzt wenn entry eingefügt ist
+                        if radius_grew {
+                            self.expand_cover_up(next.clone());
                         }
-                        drop(next_guard);
                     }
 
                     current = next;
@@ -593,7 +583,83 @@ where
         }
     }
 
-    fn compute_node_radius(&self, node: &mut RoutingNode<K, V, S>) {
+    /// Zählt einen Nachkommen bei `start` und dessen Vorfahren. Eine Parent-Schleife bricht ab.
+    /// Der Aufrufer hält dabei keinen Routing-Lock.
+    fn adjust_ancestors<F>(&self, start: Arc<Mutex<RoutingNode<K, V, S>>>, mut adjust: F)
+    where
+        F: FnMut(&mut S),
+    {
+        let mut current = start;
+        let mut seen: Vec<Arc<Mutex<RoutingNode<K, V, S>>>> = Vec::new();
+        loop {
+            if seen.iter().any(|seen_node| Arc::ptr_eq(seen_node, &current)) {
+                return;
+            }
+            seen.push(current.clone());
+            let parent = {
+                let mut guard = current.lock().unwrap();
+                adjust(&mut guard.stats);
+                guard.parent.clone()
+            };
+            let Some(parent) = parent else {
+                return;
+            };
+            if Arc::ptr_eq(&parent, &current)
+                || seen.iter().any(|seen_node| Arc::ptr_eq(seen_node, &parent))
+            {
+                return;
+            }
+            current = parent;
+        }
+    }
+
+    /// Vergrößert die Hülle der Vorfahren auf `parent_distance + covering_radius`.
+    /// Schrumpft nie. Stoppt, sobald ein Vorfahr schon abdeckt oder die Parent-Kette kreist.
+    /// Hält nie Kind- und Parent-Lock gleichzeitig.
+    fn expand_cover_up(&self, start: Arc<Mutex<RoutingNode<K, V, S>>>) {
+        let mut current = start;
+        let mut seen: Vec<Arc<Mutex<RoutingNode<K, V, S>>>> = Vec::new();
+
+        loop {
+            if seen.iter().any(|seen_node| Arc::ptr_eq(seen_node, &current)) {
+                return;
+            }
+            seen.push(current.clone());
+
+            let (parent, needed) = {
+                let node = current.lock().unwrap();
+                let Some(parent) = node.parent.clone() else {
+                    return;
+                };
+                if Arc::ptr_eq(&parent, &current)
+                    || seen.iter().any(|seen_node| Arc::ptr_eq(seen_node, &parent))
+                {
+                    return;
+                }
+                (parent, node.parent_distance + node.covering_radius)
+            };
+
+            let grew = {
+                let mut parent_guard = parent.lock().unwrap();
+                if needed > parent_guard.covering_radius {
+                    parent_guard.covering_radius = needed;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !grew {
+                return;
+            }
+            current = parent;
+        }
+    }
+
+    fn compute_node_radius(
+        &self,
+        node: &mut RoutingNode<K, V, S>,
+        self_arc: Option<&Arc<Mutex<RoutingNode<K, V, S>>>>,
+    ) {
         // C++ Referenz: computeNodeRadius()
         if node.is_leaf {
             // Für Blattknoten: Finde maximale parent_distance
@@ -621,8 +687,12 @@ where
 
             for child in &node.children {
                 if let NodePtr::Routing(ref routing_child) = child {
+                    if self_arc.is_some_and(|arc| Arc::ptr_eq(arc, routing_child)) {
+                        continue;
+                    }
                     let child_guard = routing_child.lock().unwrap();
-                    let child_distance = child.parent_distance();
+                    // Feld lesen: NodePtr::parent_distance() würde denselben Mutex erneut sperren.
+                    let child_distance = child_guard.parent_distance;
                     let total_radius = child_distance + child_guard.covering_radius;
 
                     if total_radius > max_radius {
@@ -635,6 +705,29 @@ where
             if let Some(furthest_ptr) = furthest {
                 node.covering_radius = max_radius;
                 node.furthest_descendant = Some(furthest_ptr);
+            }
+        }
+    }
+
+    /// Kinder auf den neuen Split-Knoten zeigen lassen. Der Knoten-Guard fällt,
+    /// bevor ein Kind gesperrt wird.
+    fn retarget_split_children(&self, node_arc: &Arc<Mutex<RoutingNode<K, V, S>>>) {
+        let children = {
+            let guard = node_arc.lock().unwrap();
+            guard.children.clone()
+        };
+        for child in children {
+            match child {
+                NodePtr::Object(obj_node) => {
+                    obj_node.set_parent(Some(node_arc.clone()), obj_node.dist_to_parent());
+                }
+                NodePtr::Routing(routing_node) => {
+                    if Arc::ptr_eq(&routing_node, node_arc) {
+                        continue;
+                    }
+                    let mut routing_guard = routing_node.lock().unwrap();
+                    routing_guard.parent = Some(node_arc.clone());
+                }
             }
         }
     }
@@ -657,124 +750,106 @@ where
 
         self.promote_and_partition(children, &mut node1, &mut node2);
 
-        // Parent-Referenzen für alle Kinder aktualisieren
         let node1_arc = Arc::new(Mutex::new(node1));
         let node2_arc = Arc::new(Mutex::new(node2));
+        self.retarget_split_children(&node1_arc);
+        self.retarget_split_children(&node2_arc);
 
-        // Aktualisiere Parent-Referenzen für node1 Kinder
-        {
-            let mut node1_guard = node1_arc.lock().unwrap();
-            for child in &mut node1_guard.children {
-                match child {
-                    NodePtr::Object(obj_node) => {
-                        obj_node.set_parent(Some(node1_arc.clone()), obj_node.dist_to_parent());
-                    }
-                    NodePtr::Routing(routing_node) => {
-                        let mut routing_guard = routing_node.lock().unwrap();
-                        routing_guard.parent = Some(node1_arc.clone());
-                    }
-                }
-            }
-        }
-
-        // Aktualisiere Parent-Referenzen für node2 Kinder
-        {
-            let mut node2_guard = node2_arc.lock().unwrap();
-            for child in &mut node2_guard.children {
-                match child {
-                    NodePtr::Object(obj_node) => {
-                        obj_node.set_parent(Some(node2_arc.clone()), obj_node.dist_to_parent());
-                    }
-                    NodePtr::Routing(routing_node) => {
-                        let mut routing_guard = routing_node.lock().unwrap();
-                        routing_guard.parent = Some(node2_arc.clone());
-                    }
-                }
-            }
-        }
-
-        // Berechne parent_distance für beide Knoten
-        {
-            let mut node1_guard = node1_arc.lock().unwrap();
-            let mut node2_guard = node2_arc.lock().unwrap();
-
-            if let Some(ref parent_arc) = parent {
-                let parent_guard = parent_arc.lock().unwrap();
-                let dist1 = self.metric(
-                    &parent_guard.key,
-                    parent_guard.epsilon,
-                    &node1_guard.key,
-                    node1_guard.epsilon,
-                );
-                let dist2 = self.metric(
-                    &parent_guard.key,
-                    parent_guard.epsilon,
-                    &node2_guard.key,
-                    node2_guard.epsilon,
-                );
-                node1_guard.parent_distance = if std::mem::size_of::<D>()
-                    == std::mem::size_of::<f64>()
-                    && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                {
-                    unsafe { std::mem::transmute_copy(&dist1) }
-                } else {
-                    0.0
-                };
-                node2_guard.parent_distance = if std::mem::size_of::<D>()
-                    == std::mem::size_of::<f64>()
-                    && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-                {
-                    unsafe { std::mem::transmute_copy(&dist2) }
-                } else {
-                    0.0
-                };
-            }
-        }
-
-        // Root-Split behandeln oder Parent aktualisieren
+        // Root-Split behandeln oder Parent aktualisieren.
+        // Kind-Guards sind frei, bevor der Parent gesperrt wird.
         if is_root {
-            // Erstelle neuen Root
-            let mut new_root = RoutingNode::new(false);
+            let (k1, e1, cr1) = {
+                let guard = node1_arc.lock().unwrap();
+                (guard.key.clone(), guard.epsilon, guard.covering_radius)
+            };
+            let (k2, e2, cr2) = {
+                let guard = node2_arc.lock().unwrap();
+                (guard.key.clone(), guard.epsilon, guard.covering_radius)
+            };
+            let mut new_root: RoutingNode<K, V, S> = RoutingNode::new(false);
+            let d1 = dist_value_as_f64(self.metric(&new_root.key, new_root.epsilon, &k1, e1));
+            let d2 = dist_value_as_f64(self.metric(&new_root.key, new_root.epsilon, &k2, e2));
+            new_root.covering_radius = (d1 + cr1).max(d2 + cr2);
+            {
+                let guard = node1_arc.lock().unwrap();
+                new_root.stats.add_descendants(&guard.stats);
+            }
+            {
+                let guard = node2_arc.lock().unwrap();
+                new_root.stats.add_descendants(&guard.stats);
+            }
             new_root.children.push(NodePtr::Routing(node1_arc.clone()));
             new_root.children.push(NodePtr::Routing(node2_arc.clone()));
-
             let new_root_arc = Arc::new(Mutex::new(new_root));
-
-            // Setze Parent-Referenzen für neue Knoten
             {
-                let mut node1_guard = node1_arc.lock().unwrap();
-                let mut node2_guard = node2_arc.lock().unwrap();
-                node1_guard.parent = Some(new_root_arc.clone());
-                node2_guard.parent = Some(new_root_arc.clone());
-                node1_guard.parent_distance = 0.0;
-                node2_guard.parent_distance = 0.0;
+                let mut guard = node1_arc.lock().unwrap();
+                guard.parent = Some(new_root_arc.clone());
+                guard.parent_distance = d1;
             }
-
+            {
+                let mut guard = node2_arc.lock().unwrap();
+                guard.parent = Some(new_root_arc.clone());
+                guard.parent_distance = d2;
+            }
             self.root = Some(new_root_arc);
         } else if let Some(ref parent_arc) = parent {
-            // Füge beide neuen Knoten zum Parent hinzu
-            let mut parent_guard = parent_arc.lock().unwrap();
+            // node1/node2 sind neue Arcs. Zeigt parent darauf, ist die Kette schon zyklisch.
+            if Arc::ptr_eq(parent_arc, &node1_arc) || Arc::ptr_eq(parent_arc, &node2_arc) {
+                return;
+            }
 
-            // Entferne alten Knoten aus Parent
-            parent_guard.children.retain(|child| {
-                if let NodePtr::Routing(ref routing_child) = child {
-                    !Arc::ptr_eq(routing_child, &node)
-                } else {
-                    true
-                }
-            });
+            let (pkey, peps) = {
+                let parent_guard = parent_arc.lock().unwrap();
+                (parent_guard.key.clone(), parent_guard.epsilon)
+            };
+            let (k1, e1) = {
+                let guard = node1_arc.lock().unwrap();
+                (guard.key.clone(), guard.epsilon)
+            };
+            let (k2, e2) = {
+                let guard = node2_arc.lock().unwrap();
+                (guard.key.clone(), guard.epsilon)
+            };
+            let d1 = dist_value_as_f64(self.metric(&pkey, peps, &k1, e1));
+            let d2 = dist_value_as_f64(self.metric(&pkey, peps, &k2, e2));
+            {
+                let mut guard = node1_arc.lock().unwrap();
+                guard.parent = Some(parent_arc.clone());
+                guard.parent_distance = d1;
+            }
+            {
+                let mut guard = node2_arc.lock().unwrap();
+                guard.parent = Some(parent_arc.clone());
+                guard.parent_distance = d2;
+            }
 
-            // Füge neue Knoten hinzu
-            parent_guard
-                .children
-                .push(NodePtr::Routing(node1_arc.clone()));
-            parent_guard
-                .children
-                .push(NodePtr::Routing(node2_arc.clone()));
+            let too_big = {
+                let mut parent_guard = parent_arc.lock().unwrap();
+                parent_guard.children.retain(|child| {
+                    if let NodePtr::Routing(ref routing_child) = child {
+                        !Arc::ptr_eq(routing_child, &node)
+                    } else {
+                        true
+                    }
+                });
+                parent_guard
+                    .children
+                    .push(NodePtr::Routing(node1_arc.clone()));
+                parent_guard
+                    .children
+                    .push(NodePtr::Routing(node2_arc.clone()));
+                parent_guard.children.len() > self.max_node_size
+            };
 
-            // Prüfe ob Parent zu viele Kinder hat
-            if parent_guard.children.len() > self.max_node_size {
-                drop(parent_guard);
+            self.expand_cover_up(node1_arc.clone());
+            self.expand_cover_up(node2_arc.clone());
+
+            // Dieselbe Parent-Schleife nicht erneut splitten: children bliebe über max.
+            if too_big
+                && !Arc::ptr_eq(parent_arc, &node)
+                && !Arc::ptr_eq(parent_arc, &node1_arc)
+                && !Arc::ptr_eq(parent_arc, &node2_arc)
+            {
                 self.split(parent_arc.clone());
             }
         }
@@ -857,8 +932,8 @@ where
             }
 
             // Compute node radius für beide Knoten
-            self.compute_node_radius(node1);
-            self.compute_node_radius(node2);
+            self.compute_node_radius(node1, None);
+            self.compute_node_radius(node2, None);
         }
     }
 
@@ -1168,10 +1243,10 @@ where
                 _ => true,
             });
 
-            // Aktualisiere Stats
+            // Aktualisiere Stats, danach die Vorfahren ohne gehaltenen Kind-Lock.
+            let ancestor = parent_guard.parent.clone();
             let entry_value = entry.value.read().unwrap();
             parent_guard.stats.remove_descendant(&*entry_value);
-            drop(entry_value);
 
             // Prüfe ob furthest_descendant entfernt wurde
             let needs_radius_recompute =
@@ -1182,11 +1257,19 @@ where
                 };
 
             drop(parent_guard);
+            if let Some(ancestor) = ancestor {
+                if !Arc::ptr_eq(&ancestor, &parent_arc) {
+                    self.adjust_ancestors(ancestor, |stats| {
+                        stats.remove_descendant(&*entry_value)
+                    });
+                }
+            }
+            drop(entry_value);
 
             // Covering-Radius neu berechnen wenn nötig
             if needs_radius_recompute {
                 let mut parent_guard = parent_arc.lock().unwrap();
-                self.compute_node_radius(&mut parent_guard);
+                self.compute_node_radius(&mut parent_guard, Some(&parent_arc));
                 drop(parent_guard);
             }
 
@@ -1393,15 +1476,17 @@ where
             (grandchild, needs_recompute)
         };
 
-        // Setze parent und parent_distance für grandchild
+        // Parent-Zeiger setzen, bevor `to` gesperrt wird. Eigenes Arc nicht erneut locken.
         match &grandchild {
-            NodePtr::Object(_obj_node) => {
-                // Für ObjectNodes: parent kann nicht direkt gesetzt werden wenn Arc nicht mut ist
+            NodePtr::Object(obj_node) => {
+                obj_node.set_parent(Some(to.clone()), nearest_dist_f64);
             }
             NodePtr::Routing(routing_node) => {
-                let mut routing_guard = routing_node.lock().unwrap();
-                routing_guard.parent = Some(to.clone());
-                routing_guard.parent_distance = nearest_dist_f64;
+                if !Arc::ptr_eq(routing_node, &to) && !Arc::ptr_eq(routing_node, &from) {
+                    let mut routing_guard = routing_node.lock().unwrap();
+                    routing_guard.parent = Some(to.clone());
+                    routing_guard.parent_distance = nearest_dist_f64;
+                }
             }
         }
 
@@ -1413,8 +1498,8 @@ where
                 to_guard.stats.add_descendant(&*v);
                 drop(to_guard);
             }
-        } else {
-            if let NodePtr::Routing(ref routing_node) = grandchild {
+        } else if let NodePtr::Routing(ref routing_node) = grandchild {
+            if !Arc::ptr_eq(routing_node, &to) {
                 let routing_guard = routing_node.lock().unwrap();
                 let mut to_guard = to.lock().unwrap();
                 to_guard.stats.add_descendants(&routing_guard.stats);
@@ -1422,21 +1507,16 @@ where
             }
         }
 
-        // Füge zu to hinzu
-        {
+        let radius_grew = {
             let mut to_guard = to.lock().unwrap();
             let current_covering_radius = to_guard.covering_radius;
             let is_furthest = is_leaf && nearest_dist_f64 > current_covering_radius;
 
             to_guard.children.push(grandchild);
 
-            // Aktualisiere covering_radius von to wenn nötig
             if !is_leaf {
-                // Für innere Knoten: computeNonLeafRadius
-                self.compute_node_radius(&mut to_guard);
+                self.compute_node_radius(&mut to_guard, Some(&to));
             } else if is_furthest {
-                // Für Blattknoten: prüfe ob covering_radius aktualisiert werden muss
-                // grandchild wurde bereits gepusht, hole letzten Eintrag
                 let furthest_ptr =
                     if let Some(NodePtr::Object(ref obj_node)) = to_guard.children.last() {
                         Some(obj_node.as_ref() as *const ObjectNode<K, V, S>)
@@ -1448,12 +1528,15 @@ where
                     to_guard.furthest_descendant = Some(ptr);
                 }
             }
+            to_guard.covering_radius > current_covering_radius
+        };
+        if radius_grew {
+            self.expand_cover_up(to);
         }
 
-        // Aktualisiere Radien von from wenn nötig
         if needs_radius_recompute {
             let mut from_guard = from.lock().unwrap();
-            self.compute_node_radius(&mut from_guard);
+            self.compute_node_radius(&mut from_guard, Some(&from));
         }
     }
 
@@ -1463,6 +1546,9 @@ where
         to: Arc<Mutex<RoutingNode<K, V, S>>>,
         from_to_distance: f64,
     ) {
+        if Arc::ptr_eq(&from, &to) {
+            return;
+        }
         // C++ Referenz: mergeRoutingNodes()
         let (is_leaf, from_covering_radius, to_covering_radius, to_key, to_eps) = {
             let from_guard = from.lock().unwrap();
@@ -1496,24 +1582,19 @@ where
             // Berechne neue parent_distance
             let child_key = child.get_key();
             let new_parent_distance = self.metric(&to_key, to_eps, &child_key, child.epsilon());
-            let new_parent_distance_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
-                && std::mem::align_of::<D>() == std::mem::align_of::<f64>()
-            {
-                unsafe { std::mem::transmute_copy(&new_parent_distance) }
-            } else {
-                0.0
-            };
+            let new_parent_distance_f64 = dist_value_as_f64(new_parent_distance);
 
-            // Setze parent und parent_distance
+            // Kind-Guard fällt, bevor `to` gesperrt wird. Eigenes Arc nicht erneut locken.
             match &mut child {
-                NodePtr::Object(_obj_node) => {
-                    // Für ObjectNodes: parent kann nicht direkt gesetzt werden wenn Arc nicht mut ist
-                    // Parent wird später gesetzt wenn möglich
+                NodePtr::Object(obj_node) => {
+                    obj_node.set_parent(Some(to.clone()), new_parent_distance_f64);
                 }
                 NodePtr::Routing(routing_node) => {
-                    let mut routing_guard = routing_node.lock().unwrap();
-                    routing_guard.parent = Some(to.clone());
-                    routing_guard.parent_distance = new_parent_distance_f64;
+                    if !Arc::ptr_eq(routing_node, &to) && !Arc::ptr_eq(routing_node, &from) {
+                        let mut routing_guard = routing_node.lock().unwrap();
+                        routing_guard.parent = Some(to.clone());
+                        routing_guard.parent_distance = new_parent_distance_f64;
+                    }
                 }
             }
 
@@ -1534,6 +1615,12 @@ where
                 false
             };
 
+            if is_leaf {
+                if let NodePtr::Object(ref obj_node) = child {
+                    let v = obj_node.value.read().unwrap();
+                    to_guard.stats.add_descendant(&*v);
+                }
+            }
             to_guard.children.push(child);
 
             if is_furthest {
@@ -1553,28 +1640,22 @@ where
             drop(to_guard);
         }
 
-        // Aktualisiere Stats - durchlaufe alle Kinder von from
-        {
+        if !is_leaf {
             let mut to_guard = to.lock().unwrap();
             let from_guard = from.lock().unwrap();
-            if is_leaf {
-                // Für Blattknoten: zähle ObjectNodes
-                for child in &from_guard.children {
-                    if let NodePtr::Object(ref obj_node) = child {
-                        let v = obj_node.value.read().unwrap();
-                        to_guard.stats.add_descendant(&*v);
-                    }
-                }
-            } else {
-                // Für innere Knoten: addiere Stats
-                to_guard.stats.add_descendants(&from_guard.stats);
-            }
+            to_guard.stats.add_descendants(&from_guard.stats);
         }
 
         if needs_recompute {
-            // computeNonLeafRadius - vereinfacht: compute_node_radius
             let mut to_guard = to.lock().unwrap();
-            self.compute_node_radius(&mut to_guard);
+            self.compute_node_radius(&mut to_guard, Some(&to));
+        }
+        let radius_grew = {
+            let to_guard = to.lock().unwrap();
+            to_guard.covering_radius > to_covering_radius
+        };
+        if radius_grew {
+            self.expand_cover_up(to.clone());
         }
 
         // Entferne from aus Parent

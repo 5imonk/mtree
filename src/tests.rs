@@ -985,4 +985,207 @@ mod tests {
         assert!(payloads.contains(&"active:e".to_string()));
         assert!(!payloads.contains(&"active:a".to_string()));
     }
+
+    /// Nach vielen erase/insert muss die k-te Distanz die sortierte Distanz der übrigen Keys sein.
+    /// Siehe `docs/bug-knn-after-replace.md`.
+    #[test]
+    fn knn_from_entry_matches_naive_after_replaces() {
+        let mut tree = MTree::with_capacity_hint(128, Euclid2d);
+        let mut ids = Vec::new();
+        for i in 0..128i64 {
+            let id = tree
+                .insert_with_identity((i, 0), format!("v{i}"), &i)
+                .unwrap();
+            ids.push(id);
+        }
+        for step in 0..400i64 {
+            let victim = (step as usize) % ids.len();
+            assert!(tree.erase_by_id(ids[victim]));
+            ids[victim] = tree
+                .insert_with_identity((step, step * 3), format!("n{step}"), &(1_000 + step))
+                .unwrap();
+        }
+
+        let dist = Euclid2d;
+        let entries: Vec<_> = tree.iter().map(|n| (n.key(), n.id)).collect();
+        for (key, id) in &entries {
+            let hits = tree.knn_from_entry(*id, 6, false, ()).unwrap();
+            assert_eq!(hits.len(), 6);
+            let mut brute: Vec<f64> = entries
+                .iter()
+                .filter(|(_, other)| other != id)
+                .map(|(other, _)| dist.distance(key, other))
+                .collect();
+            brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for (hit, expected) in hits.iter().zip(brute.iter()) {
+                assert!(
+                    (hit.1 - *expected).abs() < 1e-6,
+                    "key={key:?} knn={} brute={expected}",
+                    hit.1
+                );
+            }
+        }
+    }
+
+    /// Zufällige insert/erase, ein Thread (`&mut self`): kNN und Radius bleiben bei der Referenz.
+    /// Seed `0x5A17_5EED` (xorshift64). Knoten 2/4, damit Split, Donate und Merge oft laufen.
+    #[test]
+    fn knn_matches_naive_under_random_replaces() {
+        use crate::EntryId;
+
+        const SEED: u64 = 0x5A17_5EED;
+        const K: usize = 5;
+        const TOL: f64 = 1e-6;
+
+        fn xorshift64(state: &mut u64) -> u64 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            x
+        }
+
+        // *3-Gitter: Distanz exakt 25 ist unmöglich, Identity-ε verschiebt die Kugel nicht.
+        fn draw_key(state: &mut u64, live: &[(EntryId, (i64, i64))]) -> (i64, i64) {
+            loop {
+                let x = ((xorshift64(state) % 81) as i64 - 40) * 3;
+                let y = ((xorshift64(state) % 81) as i64 - 40) * 3;
+                if live.iter().all(|(_, key)| *key != (x, y)) {
+                    return (x, y);
+                }
+            }
+        }
+
+        fn assert_knn(
+            tree: &MTree<(i64, i64), String>,
+            live: &[(EntryId, (i64, i64))],
+            id: EntryId,
+            key: (i64, i64),
+            op: u64,
+        ) {
+            let hits = tree.knn_from_entry(id, K, false, ()).unwrap_or_else(|| {
+                panic!("seed={SEED:#x} op={op} key={key:?} knn=fehlt brute=fehlt");
+            });
+            let mut brute: Vec<f64> = live
+                .iter()
+                .filter(|(other, _)| *other != id)
+                .map(|(_, other)| Euclid2d.distance(&key, other))
+                .collect();
+            brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert!(
+                hits.len() == K && brute.len() >= K,
+                "seed={SEED:#x} op={op} key={key:?} knn={} brute={}",
+                hits.first().map(|hit| hit.1).unwrap_or(f64::NAN),
+                brute.first().copied().unwrap_or(f64::NAN)
+            );
+            for (hit, expected) in hits.iter().zip(brute.iter()) {
+                assert!(
+                    (hit.1 - *expected).abs() < TOL,
+                    "seed={SEED:#x} op={op} key={key:?} knn={} brute={expected}",
+                    hit.1
+                );
+            }
+        }
+
+        // Alle 100 Operationen nur fünf Ids, nicht der ganze Bestand.
+        fn spot_check(
+            tree: &MTree<(i64, i64), String>,
+            live: &[(EntryId, (i64, i64))],
+            rng: &mut u64,
+            op: u64,
+        ) {
+            for _ in 0..5 {
+                let idx = (xorshift64(rng) as usize) % live.len();
+                let (id, key) = live[idx];
+                assert_knn(tree, live, id, key, op);
+            }
+        }
+
+        fn insert_one(
+            tree: &mut MTree<(i64, i64), String>,
+            live: &mut Vec<(EntryId, (i64, i64))>,
+            rng: &mut u64,
+            op: &mut u64,
+        ) {
+            let key = draw_key(rng, live);
+            *op += 1;
+            let id = tree
+                .insert_with_identity(key, format!("v{}", *op), &*op)
+                .unwrap();
+            live.push((id, key));
+        }
+
+        fn erase_one(
+            tree: &mut MTree<(i64, i64), String>,
+            live: &mut Vec<(EntryId, (i64, i64))>,
+            rng: &mut u64,
+            op: &mut u64,
+        ) {
+            let idx = (xorshift64(rng) as usize) % live.len();
+            let (id, key) = live.swap_remove(idx);
+            *op += 1;
+            assert!(
+                tree.erase_by_id(id),
+                "seed={SEED:#x} op={op} key={key:?} knn=erase brute=fehlt"
+            );
+        }
+
+        let mut rng = SEED;
+        let mut op = 0u64;
+        let mut tree = MTree::with_params(2, 4, 3, Euclid2d);
+        let mut live: Vec<(EntryId, (i64, i64))> = Vec::new();
+
+        // Zuerst 200 eindeutige Keys, danach 2000 gemischte Operationen (Bestand etwa 80 bis 200).
+        while live.len() < 200 {
+            insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            if op % 100 == 0 {
+                spot_check(&tree, &live, &mut rng, op);
+            }
+        }
+        for _ in 0..2_000 {
+            if live.len() > 200 {
+                erase_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else if live.len() < 80 {
+                insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else if xorshift64(&mut rng) & 1 == 0 {
+                insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else {
+                erase_one(&mut tree, &mut live, &mut rng, &mut op);
+            }
+            if op % 100 == 0 {
+                spot_check(&tree, &live, &mut rng, op);
+            }
+        }
+
+        let q_idx = (xorshift64(&mut rng) as usize) % live.len();
+        let qkey = live[q_idx].1;
+        assert_eq!(
+            tree.size(),
+            live.len(),
+            "seed={SEED:#x} op={op} key={qkey:?} size {} != {}",
+            tree.size(),
+            live.len()
+        );
+        for &(id, key) in &live {
+            assert_knn(&tree, &live, id, key, op);
+        }
+
+        let got: BTreeSet<_> = tree
+            .range_search(&qkey, RangeSearchConfig::new(25.0))
+            .map(|(node, _)| node.key())
+            .collect();
+        let naive_rows: Vec<((i64, i64), String)> =
+            live.iter().map(|(_, key)| (*key, String::new())).collect();
+        let expect: BTreeSet<_> = naive_range_search(&naive_rows, &qkey, 25.0)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            got, expect,
+            "seed={SEED:#x} op={op} key={qkey:?} radius=25.0 treffer {} vs {}",
+            got.len(),
+            expect.len()
+        );
+    }
 }
