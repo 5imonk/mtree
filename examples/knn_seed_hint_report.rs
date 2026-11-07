@@ -7,7 +7,7 @@
 //!
 //! Uses `mtree` with feature `knn_stats` (enabled by this crate).
 //!
-//! Policies: `fixed` (5,100,20) vs `scaled` (`params_for(n)`).
+//! Policies: `fixed` (5,100,20) vs `scaled` (`node_params_for_capacity(n)`).
 //! Modes: `none`, `nearest` (1-NN), `kth` (k-th NN), `random` (mean over 8 draws).
 
 use mtree::distance::Distance;
@@ -279,7 +279,7 @@ fn main() {
             }
             let nearest_ids: Vec<_> = needles
                 .iter()
-                .map(|needle| tree.knn_search(needle, 1, ())[0].0.id)
+                .map(|needle| tree.knn_search(needle, 1, ())[0].0)
                 .collect();
             eprintln!("done");
 
@@ -292,7 +292,7 @@ fn main() {
                     .iter()
                     .map(|needle| {
                         let hits = tree.knn_search(needle, k, ());
-                        hits.last().expect("knn_search returned empty").0.id
+                        hits.last().expect("knn_search returned empty").0
                     })
                     .collect();
 

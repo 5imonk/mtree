@@ -1,3 +1,6 @@
 /target
 **/target
 /Cargo.lock
+
+# Local symlink to Cursor-managed canvases (~/.cursor/projects/.../canvases)
+/canvases

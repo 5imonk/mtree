@@ -12,7 +12,7 @@
 //! - `needle_none`: `knn_search(&key, k, ())` — Self included at dist 0
 //! - `needle_hint`: `knn_search(&key, k, KnnConfig::new().seed(id))` — Self included
 //!
-//! Policies: `fixed` (5,100,20) vs `scaled` (`params_for(n)`).
+//! Policies: `fixed` (5,100,20) vs `scaled` (`node_params_for_capacity(n)`).
 
 use mtree::distance::Distance;
 use mtree::{node_params_for_capacity, EntryId, KnnConfig, MTree};
@@ -157,11 +157,11 @@ fn run_mode(
                 let _ = tree.knn_from_entry(id, k, false, ());
             }
             Mode::NeedleNone => {
-                let key = tree.get(id).expect("query id").key();
+                let key = tree.key(id).expect("query id");
                 let _ = tree.knn_search(&key, k, ());
             }
             Mode::NeedleHint => {
-                let key = tree.get(id).expect("query id").key();
+                let key = tree.key(id).expect("query id");
                 let _ = tree.knn_search(&key, k, KnnConfig::new().seed(id));
             }
         }

@@ -498,7 +498,8 @@ fn bench_entry_id_ops(c: &mut Criterion) {
     group.bench_function("get_by_id", |b| {
         b.iter(|| {
             for id in &ids {
-                black_box(tree.get(*id));
+                black_box(tree.key(*id));
+                black_box(tree.payload(*id));
             }
         })
     });

@@ -5,7 +5,7 @@
 // Groups:
 // - knn_seed_hint: space needles; modes none/nearest/kth/random
 // - knn_from_entry_vs_needle: stored entries; from_entry / needle_none / needle_hint
-// Policies: fixed (5,100,20) vs scaled (params_for(n)).
+// Policies: fixed (5,100,20) vs scaled (node_params_for_capacity(n)).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use mtree::distance::Distance;
@@ -101,7 +101,7 @@ fn prepare(n: usize, policy: Policy, ks: &[usize]) -> Prepared {
     }
     let nearest_ids: Vec<_> = needles
         .iter()
-        .map(|needle| tree.knn_search(needle, 1, ())[0].0.id)
+        .map(|needle| tree.knn_search(needle, 1, ())[0].0)
         .collect();
     let mut kth_ids = HashMap::new();
     for &k in ks {
@@ -109,7 +109,7 @@ fn prepare(n: usize, policy: Policy, ks: &[usize]) -> Prepared {
             .iter()
             .map(|needle| {
                 let hits = tree.knn_search(needle, k, ());
-                hits.last().expect("knn_search returned empty").0.id
+                hits.last().expect("knn_search returned empty").0
             })
             .collect();
         kth_ids.insert(k, ids_for_k);
@@ -212,7 +212,7 @@ fn prepare_from_entry(n: usize, policy: Policy) -> PreparedFromEntry {
     let queries: Vec<_> = (0..take)
         .map(|_| {
             let id = ids[rng.gen_range(0..ids.len())];
-            let key = tree.get(id).expect("id").key();
+            let key = tree.key(id).expect("id");
             (id, key)
         })
         .collect();
@@ -270,9 +270,52 @@ fn bench_knn_from_entry_vs_needle(c: &mut Criterion) {
     group.finish();
 }
 
+/// Subset matrix matching the objective report (scaled, modes × filter).
+fn bench_knn_query_variants(c: &mut Criterion) {
+    use mtree_experiment::{
+        build_tree, gen_active_data, prefetch_queries, run_query_batch, sample_query_ids, Policy,
+        QueryMode, QUERY_COUNT,
+    };
+
+    let mut group = c.benchmark_group("knn_query_variants");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+
+    let sizes = [500usize, 5_000, 50_000];
+    let ks = [1usize, 50];
+
+    for &n in &sizes {
+        let data = gen_active_data(n, 42);
+        let (tree, ids) = build_tree(Policy::Scaled, n, &data);
+        let query_ids = sample_query_ids(&ids, QUERY_COUNT, 11);
+        let queries = prefetch_queries(&tree, &query_ids);
+
+        for &k in &ks {
+            for filter in [false, true] {
+                for mode in QueryMode::all() {
+                    let filter_label = if filter { "on" } else { "off" };
+                    let id = BenchmarkId::new(
+                        format!("n={n}/k={k}/filter={filter_label}"),
+                        mode.as_str(),
+                    );
+                    group.bench_with_input(id, &(&tree, &queries), |b, (tree, queries)| {
+                        b.iter(|| {
+                            run_query_batch(tree, queries, k, mode, filter);
+                        })
+                    });
+                }
+            }
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_knn_seed_hint,
-    bench_knn_from_entry_vs_needle
+    bench_knn_from_entry_vs_needle,
+    bench_knn_query_variants
 );
 criterion_main!(benches);
