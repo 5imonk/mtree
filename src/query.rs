@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::collections::BinaryHeap;
+use crate::entry::EntryId;
 use crate::node::{ObjectNode, RoutingNode, NodePtr};
 use crate::stats::NodeStats;
 use crate::tree::{metric_distance, metric_f64, DistanceType};
@@ -188,15 +189,13 @@ where
     }
 }
 
-impl<K, V, D, S> Iterator for Query<K, V, D, S>
+impl<K, V, D, S> Query<K, V, D, S>
 where
     K: Clone + Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
 {
-    type Item = (Arc<ObjectNode<K, V, S>>, D);
-    
-    fn next(&mut self) -> Option<Self::Item> {
+    pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
         if self.is_at_end {
             return None;
         }
@@ -251,6 +250,19 @@ where
                 return None;
             }
         }
+    }
+}
+
+impl<K, V, D, S> Iterator for Query<K, V, D, S>
+where
+    K: Clone + Send + Sync,
+    D: DistanceType,
+    S: NodeStats<K, V>,
+{
+    type Item = (EntryId, D);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_object().map(|(node, dist)| (node.id, dist))
     }
 }
 
@@ -379,15 +391,13 @@ where
     }
 }
 
-impl<K, V, D, S> Iterator for RangeQuery<K, V, D, S>
+impl<K, V, D, S> RangeQuery<K, V, D, S>
 where
     K: Clone + Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
 {
-    type Item = (Arc<ObjectNode<K, V, S>>, D);
-    
-    fn next(&mut self) -> Option<Self::Item> {
+    pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
         if self.is_at_end {
             return None;
         }
@@ -437,5 +447,18 @@ where
                 return None;
             }
         }
+    }
+}
+
+impl<K, V, D, S> Iterator for RangeQuery<K, V, D, S>
+where
+    K: Clone + Send + Sync,
+    D: DistanceType,
+    S: NodeStats<K, V>,
+{
+    type Item = (EntryId, D);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_object().map(|(node, dist)| (node.id, dist))
     }
 }

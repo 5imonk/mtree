@@ -295,7 +295,11 @@ where
         from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
-        let mut all: Vec<_> = self.query_ball(needle, needle_eps, max_radius).collect();
+        let mut query = self.query_ball(needle, needle_eps, max_radius);
+        let mut all = Vec::new();
+        while let Some(hit) = query.next_object() {
+            all.push(hit);
+        }
         if let Some(from) = from {
             if from.exclude_self() {
                 all.retain(|(n, _)| n.id != from.id);
@@ -617,9 +621,11 @@ where
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self
-            .query_annulus(needle, needle_eps, min_radius, max_radius)
-            .collect();
+        let mut query = self.query_annulus(needle, needle_eps, min_radius, max_radius);
+        let mut all = Vec::new();
+        while let Some(hit) = query.next_object() {
+            all.push(hit);
+        }
         if let Some(from) = from {
             if from.exclude_self() {
                 all.retain(|(n, _)| n.id != from.id);
