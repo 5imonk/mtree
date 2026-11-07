@@ -7,6 +7,7 @@ use crate::entry::EntryId;
 use crate::stats::NodeStats;
 
 /// Basis-Trait für Knoten
+#[allow(dead_code)]
 pub trait Node<K>
 where
     K: Send + Sync,

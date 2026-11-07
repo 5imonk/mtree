@@ -45,8 +45,9 @@ let id = tree.insert((1, 2), "Raum A".to_string()).unwrap();
 let _ = tree.insert((3, 4), "Raum B".to_string()).unwrap();
 
 // Alle Einträge (schnell: Scan über internen Index, keine Metrik)
-for node in tree.iter() {
-    let _ = (node.key(), node.payload());
+let ids: Vec<_> = tree.iter().collect();
+for id in ids {
+    let _ = (tree.key(id), tree.payload(id));
 }
 
 // Metrische Suche — siehe Abschnitt unten
@@ -63,7 +64,7 @@ Vier öffentliche Einstiege, optional mit Filter und (bei k-NN / Annulus) Radius
 
 | Methode | Bedeutung |
 |---------|-----------|
-| `knn_search` | k nächste Nachbarn; Config optional (`()`, `None` oder `KnnConfig`); mit Radien `min < dist ≤ max`; optional `.seed(EntryId)` als Pruning-Hint |
+| `knn_search` | k nächste Nachbarn als `(EntryId, Distanz)`; Config optional (`()`, `None` oder `KnnConfig`); mit Radien `min < dist ≤ max`; optional `.seed(EntryId)` als Pruning-Hint |
 | `knn_from_entry` | k-NN von einem gespeicherten `EntryId`; `include_self` steuert, ob der Punkt selbst zählt |
 | `search` | Annulus `min_radius < dist ≤ max_radius` (`SearchConfig` Pflicht) |
 | `range_search` | Kugel `dist ≤ radius` (`RangeSearchConfig` Pflicht) |
@@ -111,24 +112,19 @@ let in_ball: Vec<_> = tree
 
 ### Key und Value per `EntryId`
 
-`get(id)` liefert `Option<&Arc<ObjectNode<…>>>`. Darauf Key und Value lesen:
+`knn_search`, `knn_from_entry`, `search`, `range_search` und `iter` liefern `EntryId`. Key, Nutzdaten und Epsilon liest man am Baum:
 
 ```rust
 let id = tree.insert((1, 2), "Raum A".to_string()).unwrap();
 
-// Variante 1: if let
-if let Some(node) = tree.get(id) {
-    let key: (i64, i64) = node.key();    // K — Koordinaten / Metrik-Key
-    let value: String = node.payload();  // V — Nutzdaten
-}
-
-// Variante 2: map (nach erase liefert get None)
-let value = tree.get(id).map(|n| n.payload());
-let key   = tree.get(id).map(|n| n.key());
+let key: Option<(i64, i64)> = tree.key(id);
+let value: Option<String> = tree.payload(id);
+let epsilon: Option<f64> = tree.epsilon(id);
 
 // Nach erase_by_id: ID ungültig (Slot kann später recycelt werden)
 tree.erase_by_id(id);
-assert!(tree.get(id).is_none());
+assert!(tree.key(id).is_none());
+assert!(tree.payload(id).is_none());
 
 // Paralleles Side-Array (optional): dichter Slot-Index ohne unsafe
 let slot = id.slot_index();
@@ -165,6 +161,10 @@ Die Metrik ist überall `d'(a,b) = Distance(K_a, K_b) + |ε_a − ε_b|` mit `ε
 `erase_by_key(&K)` löscht nur, wenn genau ein Eintrag mit diesem Key existiert; sonst `erase_by_id` oder `erase_by_key_identity`.
 
 Für Float-Vektoren als Key: `mtree::distance::Point` verwenden (`Hash` + `Eq` auf Bit-Pattern).
+
+## Version
+
+`1.0.0`, auch als `mtree::VERSION`. Ab `1.0` sind Brüche an dieser API `2.0`, kompatible Fixes `1.0.z`. Das Changelog steht in `CHANGELOG.md`.
 
 ## Lizenz
 

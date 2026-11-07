@@ -2,6 +2,8 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
+#![allow(dead_code)]
+
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
 

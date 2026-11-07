@@ -23,6 +23,13 @@ use std::collections::BinaryHeap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
+fn entry_hits<K, V, D, S>(hits: Vec<(Arc<ObjectNode<K, V, S>>, D)>) -> Vec<(EntryId, D)>
+where
+    S: NodeStats<K, V>,
+{
+    hits.into_iter().map(|(node, dist)| (node.id, dist)).collect()
+}
+
 /// Wie der Seed in der k-NN-Traversierung behandelt wird.
 pub(crate) enum KnnSeedMode {
     /// Needle = gespeicherter Eintrag; Distanz 0, optional Self ausschließen.
@@ -220,7 +227,7 @@ where
         needle: &K,
         k: usize,
         config: impl IntoKnnConfig<'a, D, V>,
-    ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
+    ) -> Vec<(EntryId, D)> {
         let cfg = config.into_knn_config();
         let seed_ctx = cfg.seed.and_then(|id| {
             self.get(id).map(|obj| KnnSeedCtx {
@@ -229,7 +236,7 @@ where
                 mode: KnnSeedMode::Hint,
             })
         });
-        self.knn_search_dispatch(needle, cfg.epsilon, k, cfg, seed_ctx.as_ref())
+        entry_hits(self.knn_search_dispatch(needle, cfg.epsilon, k, cfg, seed_ctx.as_ref()))
     }
 
     /// k-NN mit einem gespeicherten Eintrag als Query.
@@ -244,7 +251,7 @@ where
         k: usize,
         include_self: bool,
         config: impl IntoKnnConfig<'a, D, V>,
-    ) -> Option<Vec<(Arc<ObjectNode<K, V, S>>, D)>> {
+    ) -> Option<Vec<(EntryId, D)>> {
         let obj = self.get(id)?;
         if k == 0 {
             return Some(Vec::new());
@@ -257,7 +264,13 @@ where
             mode: KnnSeedMode::FromEntry { include_self },
         };
         let cfg = config.into_knn_config();
-        Some(self.knn_search_dispatch(&key, needle_eps, k, cfg, Some(&ctx)))
+        Some(entry_hits(self.knn_search_dispatch(
+            &key,
+            needle_eps,
+            k,
+            cfg,
+            Some(&ctx),
+        )))
     }
 
     fn knn_search_dispatch(
@@ -482,7 +495,11 @@ where
         from: Option<&KnnSeedCtx<K, V, S>>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
-        let mut results: Vec<_> = self.query_ball(needle, needle_eps, max_radius).collect();
+        let mut query = self.query_ball(needle, needle_eps, max_radius);
+        let mut results = Vec::new();
+        while let Some(hit) = query.next_object() {
+            results.push(hit);
+        }
         retain_exclude_self(&mut results, from);
         results.sort_by(|a, b| {
             let da = dist_as_f64(a.1);
@@ -747,7 +764,11 @@ where
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self.query_annulus(needle, needle_eps, min_radius, max_radius).collect();
+        let mut query = self.query_annulus(needle, needle_eps, min_radius, max_radius);
+        let mut all = Vec::new();
+        while let Some(hit) = query.next_object() {
+            all.push(hit);
+        }
         retain_exclude_self(&mut all, from);
         all.retain(|(_, d)| {
             let dist = dist_as_f64(*d);

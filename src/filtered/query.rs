@@ -3,11 +3,9 @@
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
 use crate::entry::EntryId;
-use crate::node::ObjectNode;
 use crate::query::{Query, RangeQuery};
 use crate::stats::NodeStats;
 use crate::tree::DistanceType;
-use std::sync::Arc;
 
 /// Bereichssuche (Annulus), die nur aktive Einträge liefert.
 pub struct FilteredQuery<K, V, D, S, F>
@@ -44,16 +42,16 @@ where
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    type Item = (Arc<ObjectNode<K, V, S>>, D);
+    type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((node, dist)) = self.inner.next() {
+        while let Some((node, dist)) = self.inner.next_object() {
             let active = {
                 let guard = node.value.read().unwrap();
                 (self.is_active)(node.id, &guard.1)
             };
             if active {
-                return Some((node, dist));
+                return Some((node.id, dist));
             }
         }
         None
@@ -95,16 +93,16 @@ where
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    type Item = (Arc<ObjectNode<K, V, S>>, D);
+    type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((node, dist)) = self.inner.next() {
+        while let Some((node, dist)) = self.inner.next_object() {
             let active = {
                 let guard = node.value.read().unwrap();
                 (self.is_active)(node.id, &guard.1)
             };
             if active {
-                return Some((node, dist));
+                return Some((node.id, dist));
             }
         }
         None

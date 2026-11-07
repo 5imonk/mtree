@@ -121,7 +121,10 @@ mod tests {
             .range_search(&(0, 0), RangeSearchConfig::new(2.0))
             .collect();
         assert_eq!(results.len(), 2);
-        let keys: Vec<_> = results.iter().map(|(n, _)| n.key()).collect();
+        let keys: Vec<_> = results
+            .iter()
+            .map(|(id, _)| tree.key(*id).unwrap())
+            .collect();
         assert!(keys.contains(&(0, 0)));
         assert!(keys.contains(&(1, 0)));
         assert!(!keys.contains(&(10, 10)));
@@ -135,11 +138,11 @@ mod tests {
         tree.insert((2, 0), "c".to_string()).unwrap();
         let results: Vec<_> = tree.search(&(0, 0), SearchConfig::new(0.5, 1.5)).collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.payload(), "b");
+        assert_eq!(tree.payload(results[0].0).unwrap(), "b");
         // min exklusiv, max inklusiv: 1 < d <= 2 → nur c
         let closed_max: Vec<_> = tree.search(&(0, 0), SearchConfig::new(1.0, 2.0)).collect();
         assert_eq!(closed_max.len(), 1);
-        assert_eq!(closed_max[0].0.payload(), "c");
+        assert_eq!(tree.payload(closed_max[0].0).unwrap(), "c");
     }
 
     #[test]
@@ -156,7 +159,7 @@ mod tests {
             .range_search(&(0, 0), RangeSearchConfig::new(100.0))
             .collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.payload(), "y");
+        assert_eq!(tree.payload(results[0].0).unwrap(), "y");
     }
 
     #[test]
@@ -168,8 +171,8 @@ mod tests {
         tree.insert((3, 0), "three".to_string()).unwrap();
         let knn = tree.knn_search(&(0, 0), 2, ());
         assert_eq!(knn.len(), 2);
-        assert_eq!(knn[0].0.payload(), "origin");
-        assert_eq!(knn[1].0.payload(), "one");
+        assert_eq!(tree.payload(knn[0].0).unwrap(), "origin");
+        assert_eq!(tree.payload(knn[1].0).unwrap(), "one");
     }
 
     #[test]
@@ -183,17 +186,17 @@ mod tests {
         let with_self = tree.knn_from_entry(origin, 2, true, ()).unwrap();
         let by_key = tree.knn_search(&(0, 0), 2, ());
         assert_eq!(with_self.len(), 2);
-        assert_eq!(with_self[0].0.id, origin);
+        assert_eq!(with_self[0].0, origin);
         assert_eq!(with_self[0].1, 0.0);
-        assert_eq!(with_self[0].0.payload(), by_key[0].0.payload());
-        assert_eq!(with_self[1].0.payload(), by_key[1].0.payload());
+        assert_eq!(tree.payload(with_self[0].0), tree.payload(by_key[0].0));
+        assert_eq!(tree.payload(with_self[1].0), tree.payload(by_key[1].0));
         assert!((with_self[1].1 - by_key[1].1).abs() < 1e-9);
 
         let without = tree.knn_from_entry(origin, 2, false, ()).unwrap();
         assert_eq!(without.len(), 2);
-        assert!(without.iter().all(|(n, _)| n.id != origin));
-        assert_eq!(without[0].0.payload(), "one");
-        assert_eq!(without[1].0.payload(), "two");
+        assert!(without.iter().all(|(id, _)| *id != origin));
+        assert_eq!(tree.payload(without[0].0).unwrap(), "one");
+        assert_eq!(tree.payload(without[1].0).unwrap(), "two");
     }
 
     #[test]
@@ -221,17 +224,17 @@ mod tests {
             for k in [1usize, 3, 5, 10] {
                 let with_self = small.knn_from_entry(*id, k, true, ()).unwrap();
                 assert!(!with_self.is_empty());
-                assert_eq!(with_self[0].0.id, *id);
+                assert_eq!(with_self[0].0, *id);
                 assert_eq!(with_self[0].1, 0.0);
                 let without = small.knn_from_entry(*id, k, false, ()).unwrap();
-                assert!(without.iter().all(|(n, _)| n.id != *id));
+                assert!(without.iter().all(|(hit, _)| *hit != *id));
                 assert!(without.windows(2).all(|w| w[0].1 <= w[1].1));
 
                 let from_wide = wide.knn_from_entry(*id, k, true, ()).unwrap();
                 let by_key = wide.knn_search(&key, k, ());
                 assert_eq!(from_wide.len(), by_key.len());
                 for (a, b) in from_wide.iter().zip(by_key.iter()) {
-                    assert_eq!(a.0.key(), b.0.key());
+                    assert_eq!(wide.key(a.0), wide.key(b.0));
                     assert!((a.1 - b.1).abs() < 1e-9);
                 }
 
@@ -244,7 +247,7 @@ mod tests {
                     .collect();
                 assert_eq!(without_wide.len(), expected.len());
                 for (a, b) in without_wide.iter().zip(expected.iter()) {
-                    assert_eq!(a.0.key(), b.0);
+                    assert_eq!(wide.key(a.0).unwrap(), b.0);
                     assert!((a.1 - b.2).abs() < 1e-9);
                 }
             }
@@ -271,8 +274,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].0.payload(), "active:two");
-        assert_eq!(hits[1].0.payload(), "active:three");
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "active:two");
+        assert_eq!(tree.payload(hits[1].0).unwrap(), "active:three");
 
         let band = tree
             .knn_from_entry(
@@ -282,9 +285,12 @@ mod tests {
                 KnnConfig::new().min_radius(1.0).max_radius(3.0),
             )
             .unwrap();
-        let payloads: Vec<_> = band.iter().map(|(n, _)| n.payload()).collect();
+        let payloads: Vec<_> = band
+            .iter()
+            .map(|(id, _)| tree.payload(*id).unwrap())
+            .collect();
         assert!(!payloads.iter().any(|p| p.contains("origin")));
-        let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
+        let keys: Vec<_> = band.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
         // min < dist <= max: 1 < d <= 3 → (2,0), (3,0); (1,0) auf min ausgeschlossen
         assert!(!keys.contains(&(1, 0)));
         assert!(keys.contains(&(2, 0)));
@@ -308,7 +314,7 @@ mod tests {
                 let seeded = tree.knn_search(&needle, k, KnnConfig::new().seed(*seed));
                 assert_eq!(plain.len(), seeded.len());
                 for (a, b) in plain.iter().zip(seeded.iter()) {
-                    assert_eq!(a.0.id, b.0.id);
+                    assert_eq!(a.0, b.0);
                     assert!((a.1 - b.1).abs() < 1e-9);
                 }
             }
@@ -329,16 +335,16 @@ mod tests {
         let bad_seed = tree.knn_search(&needle, 2, KnnConfig::new().seed(gone));
         assert_eq!(plain.len(), bad_seed.len());
         for (a, b) in plain.iter().zip(bad_seed.iter()) {
-            assert_eq!(a.0.id, b.0.id);
+            assert_eq!(a.0, b.0);
             assert!((a.1 - b.1).abs() < 1e-9);
         }
 
         let top1 = tree.knn_search(&needle, 1, KnnConfig::new().seed(near));
         assert_eq!(top1.len(), 1);
-        assert_eq!(top1[0].0.id, near);
+        assert_eq!(top1[0].0, near);
 
         let top1_far_seed = tree.knn_search(&needle, 1, KnnConfig::new().seed(far));
-        assert_eq!(top1_far_seed[0].0.id, near);
+        assert_eq!(top1_far_seed[0].0, near);
     }
 
     #[test]
@@ -354,8 +360,8 @@ mod tests {
             KnnConfig::new().seed(seed).min_radius(1.0).max_radius(3.0),
         );
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0.payload(), "in");
-        assert!(hits.iter().all(|(n, _)| n.id != seed));
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "in");
+        assert!(hits.iter().all(|(id, _)| *id != seed));
     }
 
     #[test]
@@ -423,7 +429,7 @@ mod tests {
                     .range_search(&needle, RangeSearchConfig::new(radius))
                     .collect();
                 let naive_results = naive_range_search(&vec_data, &needle, radius);
-                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
+                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
                 let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
                 assert_eq!(
                     mtree_keys.len(),
@@ -453,7 +459,7 @@ mod tests {
                     .search(&needle, SearchConfig::new(min_r, max_r))
                     .collect();
                 let naive_results = naive_search_min_max(&vec_data, &needle, min_r, max_r);
-                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
+                let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
                 let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
                 assert_eq!(mtree_keys.len(), naive_keys.len());
                 assert_eq!(mtree_keys, naive_keys);
@@ -481,7 +487,14 @@ mod tests {
                 for (i, ((node, dist), (key, _, naive_dist))) in
                     mtree_results.iter().zip(naive_results.iter()).enumerate()
                 {
-                    assert_eq!(node.key(), *key, "needle={:?} k={} i={}", needle, k, i);
+                    assert_eq!(
+                        tree.key(*node).unwrap(),
+                        *key,
+                        "needle={:?} k={} i={}",
+                        needle,
+                        k,
+                        i
+                    );
                     assert!(
                         (dist - naive_dist).abs() < 1e-9,
                         "needle={:?} k={} i={} dists {:?} vs {:?}",
@@ -514,7 +527,7 @@ mod tests {
             .range_search(&needle, RangeSearchConfig::new(radius))
             .collect();
         let naive_results = naive_range_search(&vec_data, &needle, radius);
-        let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
+        let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
         let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
         assert_eq!(mtree_keys, naive_keys);
     }
@@ -533,7 +546,7 @@ mod tests {
                 .range_search(&needle, RangeSearchConfig::new(20.0))
                 .collect();
             let naive_results = naive_range_search(&vec_data, &needle, 20.0);
-            let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(n, _)| n.key()).collect();
+            let mtree_keys: BTreeSet<_> = mtree_results.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
             let naive_keys: BTreeSet<_> = naive_results.iter().map(|(k, _)| *k).collect();
             assert_eq!(mtree_keys, naive_keys, "after insert {:?}", k);
         }
@@ -581,7 +594,7 @@ mod tests {
             .range_search(&Point::new(vec![1.5, 2.5]), RangeSearchConfig::new(1.0))
             .collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.payload(), "point1");
+        assert_eq!(tree.payload(results[0].0).unwrap(), "point1");
 
         assert!(tree.erase_by_key(&p2));
         assert_eq!(tree.size(), 2);
@@ -643,13 +656,17 @@ mod tests {
         let mut tree = new_tree_i64();
         let id_a = tree.insert((1, 2), "a".to_string()).unwrap();
         let id_b = tree.insert((3, 4), "b".to_string()).unwrap();
-        let payloads: Vec<_> = tree.iter().map(|n| n.payload()).collect();
+        let ids: Vec<_> = tree.iter().collect();
+        let payloads: Vec<_> = ids
+            .iter()
+            .map(|id| tree.payload(*id).unwrap())
+            .collect();
         assert_eq!(payloads.len(), 2);
         assert!(payloads.contains(&"a".to_string()));
         assert!(payloads.contains(&"b".to_string()));
         assert!(tree.erase_by_id(id_a));
         assert_eq!(tree.iter().count(), 1);
-        assert_eq!(tree.iter().next().unwrap().id, id_b);
+        assert_eq!(tree.iter().next().unwrap(), id_b);
     }
 
     #[test]
@@ -700,7 +717,7 @@ mod tests {
             .range_search(&(5, 5), RangeSearchConfig::new(0.0).identity(&t1))
             .collect();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0.payload(), "first");
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "first");
         assert_eq!(hits[0].1, 0.0);
 
         let other: Vec<_> = tree
@@ -713,7 +730,7 @@ mod tests {
 
         let knn = tree.knn_search(&(5, 5), 1, KnnConfig::new().identity(&t2));
         assert_eq!(knn.len(), 1);
-        assert_eq!(knn[0].0.payload(), "second");
+        assert_eq!(tree.payload(knn[0].0).unwrap(), "second");
         assert_eq!(knn[0].1, 0.0);
 
         assert!(!tree.erase_by_key(&(5, 5)));
@@ -739,17 +756,15 @@ mod tests {
 
         let knn = tree.knn_search(&(0, 0), 2, ());
         assert_eq!(knn.len(), 2);
-        assert!(knn.iter().all(|(n, _)| n.key() == (0, 0)));
+        assert!(knn.iter().all(|(id, _)| tree.key(*id).unwrap() == (0, 0)));
 
-        let from_entry = tree
-            .knn_from_entry(
-                tree.iter().find(|n| n.payload() == "id").unwrap().id,
-                1,
-                true,
-                (),
-            )
+        let ids: Vec<_> = tree.iter().collect();
+        let id_hit = ids
+            .into_iter()
+            .find(|id| tree.payload(*id).as_deref() == Some("id"))
             .unwrap();
-        assert_eq!(from_entry[0].0.payload(), "id");
+        let from_entry = tree.knn_from_entry(id_hit, 1, true, ()).unwrap();
+        assert_eq!(tree.payload(from_entry[0].0).unwrap(), "id");
         assert_eq!(from_entry[0].1, 0.0);
     }
 
@@ -782,7 +797,7 @@ mod tests {
         assert!(tree.update_value(id, "new".to_string()));
         assert_eq!(tree.get(id).unwrap().payload(), "new");
         let knn = tree.knn_search(&(0, 0), 1, ());
-        assert_eq!(knn[0].0.payload(), "new");
+        assert_eq!(tree.payload(knn[0].0).unwrap(), "new");
     }
 
     #[test]
@@ -794,7 +809,7 @@ mod tests {
             .range_search(&(10, 10), RangeSearchConfig::new(0.5))
             .collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.key(), (10, 10));
+        assert_eq!(tree.key(results[0].0).unwrap(), (10, 10));
         let far: Vec<_> = tree
             .range_search(&(0, 0), RangeSearchConfig::new(0.5))
             .collect();
@@ -822,8 +837,8 @@ mod tests {
                 .include_inactive(false),
         );
         assert_eq!(only_active.len(), 2);
-        assert_eq!(only_active[0].0.payload(), "active:origin");
-        assert_eq!(only_active[1].0.payload(), "active:two");
+        assert_eq!(tree.payload(only_active[0].0).unwrap(), "active:origin");
+        assert_eq!(tree.payload(only_active[1].0).unwrap(), "active:two");
 
         // k=2 Aktive, inkl. Inaktive innerhalb des Radius (Distanz des 2. Aktiven = 2)
         let with_inactive = tree.knn_search(
@@ -833,7 +848,7 @@ mod tests {
                 .with_active(is_active)
                 .include_inactive(true),
         );
-        let payloads: Vec<_> = with_inactive.iter().map(|(n, _)| n.payload()).collect();
+        let payloads: Vec<_> = with_inactive.iter().map(|(id, _)| tree.payload(*id).unwrap()).collect();
         assert!(payloads.contains(&"active:origin".to_string()));
         assert!(payloads.contains(&"inactive:one".to_string()));
         assert!(payloads.contains(&"active:two".to_string()));
@@ -861,8 +876,8 @@ mod tests {
                 .include_inactive(false),
         );
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].0.id, id0);
-        assert_eq!(hits[1].0.id, id2);
+        assert_eq!(hits[0].0, id0);
+        assert_eq!(hits[1].0, id2);
 
         let with_inactive = tree.knn_search(
             &(0, 0),
@@ -871,7 +886,7 @@ mod tests {
                 .with_active(is_active)
                 .include_inactive(true),
         );
-        let ids: Vec<_> = with_inactive.iter().map(|(n, _)| n.id).collect();
+        let ids: Vec<_> = with_inactive.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&id0));
         assert!(ids.contains(&_id1));
         assert!(ids.contains(&id2));
@@ -894,10 +909,10 @@ mod tests {
                 .include_inactive(false),
         );
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].0.payload(), "on");
-        assert_eq!(hits[0].0.key(), (2, 0));
-        assert_eq!(hits[1].0.payload(), "on");
-        assert_eq!(hits[1].0.key(), (3, 0));
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "on");
+        assert_eq!(tree.key(hits[0].0).unwrap(), (2, 0));
+        assert_eq!(tree.payload(hits[1].0).unwrap(), "on");
+        assert_eq!(tree.key(hits[1].0).unwrap(), (3, 0));
     }
 
     #[test]
@@ -935,7 +950,7 @@ mod tests {
                 .include_inactive(false),
         );
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0.payload(), "a");
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "a");
 
         let with_inactive = tree.knn_search(
             &(0, 0),
@@ -961,7 +976,7 @@ mod tests {
                 RangeSearchConfig::new(3.0).with_active(|_id, v: &String| v.starts_with("active:")),
             )
             .collect();
-        let payloads: Vec<_> = results.iter().map(|(n, _)| n.payload()).collect();
+        let payloads: Vec<_> = results.iter().map(|(id, _)| tree.payload(*id).unwrap()).collect();
         assert_eq!(results.len(), 2);
         assert!(payloads.contains(&"active:origin".to_string()));
         assert!(payloads.contains(&"active:two".to_string()));
@@ -983,7 +998,7 @@ mod tests {
                 RangeSearchConfig::new(5.0).with_active(|id, _: &String| active.contains(&id)),
             )
             .collect();
-        let ids: Vec<_> = results.iter().map(|(n, _)| n.id).collect();
+        let ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
         assert_eq!(results.len(), 2);
         assert!(ids.contains(&id0));
         assert!(ids.contains(&id2));
@@ -1005,7 +1020,7 @@ mod tests {
             )
             .collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0.payload(), "active:c");
+        assert_eq!(tree.payload(results[0].0).unwrap(), "active:c");
     }
 
     #[test]
@@ -1024,18 +1039,18 @@ mod tests {
             10,
             KnnConfig::new().min_radius(1.0).max_radius(3.0),
         );
-        let payloads: Vec<_> = hits.iter().map(|(n, _)| n.payload()).collect();
+        let payloads: Vec<_> = hits.iter().map(|(id, _)| tree.payload(*id).unwrap()).collect();
         assert_eq!(hits.len(), 2);
         assert_eq!(payloads, vec!["d2".to_string(), "d3".to_string()]);
 
         // k begrenzt
         let top1 = tree.knn_search(&(0, 0), 1, KnnConfig::new().min_radius(1.0).max_radius(3.0));
         assert_eq!(top1.len(), 1);
-        assert_eq!(top1[0].0.payload(), "d2");
+        assert_eq!(tree.payload(top1[0].0).unwrap(), "d2");
 
         // dist == min_radius ausgeschlossen; dist == max_radius eingeschlossen
         let band = tree.knn_search(&(0, 0), 5, KnnConfig::new().min_radius(2.0).max_radius(4.0));
-        let keys: Vec<_> = band.iter().map(|(n, _)| n.key()).collect();
+        let keys: Vec<_> = band.iter().map(|(id, _)| tree.key(*id).unwrap()).collect();
         assert!(!keys.contains(&(2, 0)));
         assert!(keys.contains(&(3, 0)));
         assert!(keys.contains(&(4, 0)));
@@ -1053,7 +1068,7 @@ mod tests {
             KnnConfig::new().min_radius(0.0).max_radius(10.0),
         );
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0.payload(), "b");
+        assert_eq!(tree.payload(hits[0].0).unwrap(), "b");
     }
 
     #[test]
@@ -1078,8 +1093,8 @@ mod tests {
                 .include_inactive(false),
         );
         assert_eq!(only.len(), 2);
-        assert_eq!(only[0].0.payload(), "active:c");
-        assert_eq!(only[1].0.payload(), "active:e");
+        assert_eq!(tree.payload(only[0].0).unwrap(), "active:c");
+        assert_eq!(tree.payload(only[1].0).unwrap(), "active:e");
 
         let with_inactive = tree.knn_search(
             &(0, 0),
@@ -1090,7 +1105,7 @@ mod tests {
                 .with_active(is_active)
                 .include_inactive(true),
         );
-        let payloads: Vec<_> = with_inactive.iter().map(|(n, _)| n.payload()).collect();
+        let payloads: Vec<_> = with_inactive.iter().map(|(id, _)| tree.payload(*id).unwrap()).collect();
         assert!(payloads.contains(&"inactive:b".to_string()));
         assert!(payloads.contains(&"active:c".to_string()));
         assert!(payloads.contains(&"inactive:d".to_string()));
@@ -1119,7 +1134,11 @@ mod tests {
         }
 
         let dist = Euclid2d;
-        let entries: Vec<_> = tree.iter().map(|n| (n.key(), n.id)).collect();
+        let ids: Vec<_> = tree.iter().collect();
+        let entries: Vec<_> = ids
+            .iter()
+            .map(|id| (tree.key(*id).unwrap(), *id))
+            .collect();
         for (key, id) in &entries {
             let hits = tree.knn_from_entry(*id, 6, false, ()).unwrap();
             assert_eq!(hits.len(), 6);
@@ -1183,7 +1202,11 @@ mod tests {
         }
 
         let dist = Euclid2d;
-        let entries: Vec<_> = tree.iter().map(|n| (n.key(), n.id)).collect();
+        let ids: Vec<_> = tree.iter().collect();
+        let entries: Vec<_> = ids
+            .iter()
+            .map(|id| (tree.key(*id).unwrap(), *id))
+            .collect();
 
         let reference = |key: &(i64, i64), skip: Option<EntryId>, even_only: bool| {
             let mut brute: Vec<f64> = entries
@@ -1208,7 +1231,7 @@ mod tests {
             assert_dists(&all_d, &plain_d, &format!("search key={key:?}"));
 
             let subset = tree.knn_search(key, K, KnnConfig::new().with_active(even_slot));
-            assert!(subset.iter().all(|(n, _)| even_slot(n.id, &String::new())));
+            assert!(subset.iter().all(|(id, _)| even_slot(*id, &String::new())));
             let subset_d: Vec<f64> = subset.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_d,
@@ -1233,7 +1256,7 @@ mod tests {
                 tree.knn_search(key, K, KnnConfig::new().seed(hint).with_active(even_slot));
             assert!(subset_h
                 .iter()
-                .all(|(n, _)| even_slot(n.id, &String::new())));
+                .all(|(id, _)| even_slot(*id, &String::new())));
             let subset_hd: Vec<f64> = subset_h.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_hd,
@@ -1264,7 +1287,7 @@ mod tests {
                 .unwrap();
             assert!(subset_e
                 .iter()
-                .all(|(n, _)| n.id != *id && even_slot(n.id, &String::new())));
+                .all(|(hit, _)| *hit != *id && even_slot(*hit, &String::new())));
             let subset_ed: Vec<f64> = subset_e.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_ed,
@@ -1418,9 +1441,13 @@ mod tests {
             assert_knn(&tree, &live, id, key, op);
         }
 
-        let got: BTreeSet<_> = tree
+        let got_ids: Vec<_> = tree
             .range_search(&qkey, RangeSearchConfig::new(25.0))
-            .map(|(node, _)| node.key())
+            .map(|(id, _)| id)
+            .collect();
+        let got: BTreeSet<_> = got_ids
+            .iter()
+            .map(|id| tree.key(*id).unwrap())
             .collect();
         let naive_rows: Vec<((i64, i64), String)> =
             live.iter().map(|(_, key)| (*key, String::new())).collect();
@@ -1534,7 +1561,7 @@ mod tests {
                 K,
                 KnnConfig::new().with_active(|oid: EntryId, _: &String| active.contains(&oid)),
             );
-            assert!(subset.iter().all(|(n, _)| active.contains(&n.id)));
+            assert!(subset.iter().all(|(id, _)| active.contains(id)));
             let expect_sub = reference(live, key, id, false, |oid| active.contains(&oid));
             assert_dists(
                 &hit_dists(&subset),
@@ -1563,7 +1590,7 @@ mod tests {
                     .seed(hint)
                     .with_active(|oid: EntryId, _: &String| active.contains(&oid)),
             );
-            assert!(subset_h.iter().all(|(n, _)| active.contains(&n.id)));
+            assert!(subset_h.iter().all(|(id, _)| active.contains(id)));
             assert_dists(
                 &hit_dists(&subset_h),
                 &expect_sub,
@@ -1598,7 +1625,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{tag} entry-sub knn=fehlt"));
             assert!(subset_e
                 .iter()
-                .all(|(n, _)| n.id != id && active.contains(&n.id)));
+                .all(|(hit, _)| *hit != id && active.contains(hit)));
             let expect_entry_sub = reference(live, key, id, true, |oid| active.contains(&oid));
             assert_dists(
                 &hit_dists(&subset_e),

@@ -321,12 +321,35 @@ where
     D: DistanceType,
     S: NodeStats<K, V>,
 {
-    /// Iteriert über alle Einträge (O(Kapazität von `by_id`), keine Distanzberechnung).
+    /// Iteriert über alle Eintrags-IDs (O(Kapazität von `by_id`), keine Distanzberechnung).
     ///
     /// Reihenfolge: aufsteigend nach Slot-Index, nicht Insert-Reihenfolge.
     /// Leere Slots nach `erase` werden übersprungen.
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<ObjectNode<K, V, S>>> + '_ {
-        self.by_id.iter().filter_map(|slot| slot.as_ref())
+    pub fn iter(&self) -> impl Iterator<Item = EntryId> + '_ {
+        self.by_id.iter().filter_map(|slot| slot.as_ref().map(|node| node.id))
+    }
+
+    /// Key des Eintrags, falls `id` noch belegt ist.
+    pub fn key(&self, id: EntryId) -> Option<K> {
+        self.get(id).map(|node| node.key())
+    }
+
+    /// Nutzdaten des Eintrags, falls `id` noch belegt ist.
+    pub fn payload(&self, id: EntryId) -> Option<V>
+    where
+        V: Clone,
+    {
+        self.get(id).map(|node| node.payload())
+    }
+
+    /// Identity-Epsilon des Eintrags, falls `id` noch belegt ist.
+    pub fn epsilon(&self, id: EntryId) -> Option<f64> {
+        self.get(id).map(|node| node.epsilon())
+    }
+
+    /// Liefert den Eintrag zur stabilen ID (O(1)).
+    pub(crate) fn get(&self, id: EntryId) -> Option<&Arc<ObjectNode<K, V, S>>> {
+        self.by_id.get(id.index())?.as_ref()
     }
 }
 
@@ -445,11 +468,6 @@ where
         }
 
         Ok(id)
-    }
-
-    /// Liefert den Eintrag zur stabilen ID (O(1)).
-    pub fn get(&self, id: EntryId) -> Option<&Arc<ObjectNode<K, V, S>>> {
-        self.by_id.get(id.index())?.as_ref()
     }
 
     fn tree_insert(

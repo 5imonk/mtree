@@ -5,9 +5,9 @@
 pub mod distance;
 pub mod entry;
 pub mod filtered;
-pub mod node;
+pub(crate) mod node;
 pub mod query;
-pub mod placeholder_queue;
+pub(crate) mod placeholder_queue;
 mod search;
 pub mod search_config;
 pub mod stats;
@@ -25,8 +25,10 @@ pub use search_config::{KnnConfig, RangeSearchConfig, SearchConfig};
 pub use tree::{node_params_for_capacity, MTree};
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;
-pub use placeholder_queue::PlaceholderQueue;
 pub use distance::{AsCoordinates, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
+
+/// Crate-Version aus `Cargo.toml`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(feature = "knn_stats")]
 pub use knn_stats::{
