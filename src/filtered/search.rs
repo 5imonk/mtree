@@ -9,7 +9,8 @@ use crate::node::{NodePtr, ObjectNode};
 use crate::search::{is_seeded_leaf, visit_seeded_leaf_objects, KnnSeedCtx};
 use crate::stats::NodeStats;
 use crate::tree::{
-    metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR, UPPER_BOUND_FACTOR,
+    metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR,
+    UPPER_BOUND_FACTOR,
 };
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -42,7 +43,8 @@ fn skip_self<K, V, S>(from: Option<&KnnSeedCtx<K, V, S>>, id: EntryId) -> bool
 where
     S: NodeStats<K, V>,
 {
-    from.map(|c| c.exclude_self() && c.id == id).unwrap_or(false)
+    from.map(|c| c.exclude_self() && c.id == id)
+        .unwrap_or(false)
 }
 
 fn object_dist<K, V, D, S>(
@@ -224,8 +226,11 @@ where
                 f64::INFINITY
             };
 
-            if active_distances.len() >= k && entry.distance_bound > pruning_radius_relaxed {
-                break;
+            // Oberschranke (Zentrum + Hülle) ist kein Stopp: ein zu kleiner Radius
+            // würde den Zweig mit dem echten k-ten Nachbarn abschneiden. Wie die plain
+            // Suche nur über die Unterschranke der Kinder ausdünnen.
+            if is_seeded_leaf(from, &entry.node) {
+                continue;
             }
 
             let node_guard = entry.node.lock().unwrap();
@@ -235,7 +240,8 @@ where
                         if skip_self(from, obj_node.id) {
                             continue;
                         }
-                        let dist = object_dist(obj_node, needle, needle_eps, from, distance_fn.as_ref());
+                        let dist =
+                            object_dist(obj_node, needle, needle_eps, from, distance_fn.as_ref());
                         consider(
                             obj_node.clone(),
                             dist,
@@ -527,10 +533,8 @@ where
             if entry.distance_bound < min_prune {
                 continue;
             }
-            if active_distances.len() >= k && entry.distance_bound > effective_max_relaxed {
-                break;
-            }
 
+            // Kein Abbruch über die Oberschranke; die untere Annulus-Schranke bleibt.
             if is_seeded_leaf(from, &entry.node) {
                 continue;
             }
@@ -542,7 +546,8 @@ where
                         if skip_self(from, obj_node.id) {
                             continue;
                         }
-                        let dist = object_dist(obj_node, needle, needle_eps, from, distance_fn.as_ref());
+                        let dist =
+                            object_dist(obj_node, needle, needle_eps, from, distance_fn.as_ref());
                         consider(
                             obj_node.clone(),
                             dist,
@@ -612,7 +617,9 @@ where
             return Vec::new();
         }
 
-        let mut all: Vec<_> = self.query_annulus(needle, needle_eps, min_radius, max_radius).collect();
+        let mut all: Vec<_> = self
+            .query_annulus(needle, needle_eps, min_radius, max_radius)
+            .collect();
         if let Some(from) = from {
             if from.exclude_self() {
                 all.retain(|(n, _)| n.id != from.id);
