@@ -8,6 +8,14 @@ description = "Benchmarks and reports for mtree (depends on local or git main)"
 [dependencies]
 mtree = { path = "../mtree", features = ["knn_stats"] }
 rand = "0.8"
+# kiddo 6 needs rustc ≥1.95; 5.3 is the established baseline on rustc 1.92.
+kiddo = "5.3"
+# Pin: kiddo pulls generator; 0.8.12 requires rustc 1.95.
+generator = "=0.8.11"
+rstar = "0.12"
+vpsearch = "2"
+vp_tree = "0.1.1"
+ball-tree = "0.5.2"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -216,6 +216,35 @@ fn median_f64(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Convert `(i64, i64)` keys to `[f64; 2]` for spatial baseline crates.
+pub fn key_to_f64(key: Key2d) -> [f64; 2] {
+    [key.0 as f64, key.1 as f64]
+}
+
+pub fn points_f64(data: &[(Key2d, Active)]) -> Vec<[f64; 2]> {
+    data.iter().map(|&(key, _)| key_to_f64(key)).collect()
+}
+
+pub fn query_points_f64(queries: &[(EntryId, Key2d)]) -> Vec<[f64; 2]> {
+    queries.iter().map(|&(_, key)| key_to_f64(key)).collect()
+}
+
+/// Warmup once, then `rounds` timed passes of `run`; returns median avg ms per query.
+pub fn measure_query_median<F>(query_count: usize, rounds: usize, mut run: F) -> f64
+where
+    F: FnMut(),
+{
+    run();
+    let q = query_count as f64;
+    let mut ms_samples = Vec::with_capacity(rounds);
+    for _ in 0..rounds {
+        let start = Instant::now();
+        run();
+        ms_samples.push(start.elapsed().as_secs_f64() * 1000.0 / q);
+    }
+    median_f64(&mut ms_samples)
+}
+
 /// Warmup once, then `rounds` timed passes; returns medians of per-query averages.
 pub fn measure_median(
     tree: &MTree<Key2d, Active>,

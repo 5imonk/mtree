@@ -21,6 +21,33 @@ Interaktives Dashboard (nach dem Lauf, Daten inline): Canvas
 `canvases/knn-query-performance.canvas.tsx` (Symlink auf Cursors Canvas-Ordner)
 neben dem Chat öffnen — Varianten vergleichen oder einzelne Kurven betrachten.
 
+## Baseline-Latency vs. etablierte Libraries
+
+Vergleicht mtree (`needle_none`, plus unfair `needle_hint`) auf derselben
+2D-Euclidean-Punktmenge mit:
+
+- **Metrik-Peers (fairer):** `vpsearch`, `vp_tree`, `ball-tree`
+- **Euclidean/Spatial-Ceiling:** `kiddo`, `rstar`
+
+Kein Active-Filter.
+
+```bash
+cargo run --release --example knn_baseline_latency_report
+```
+
+Schreibt CSV nach `reports/knn_baseline_latency.csv` (und stdout) sowie Markdown-Matrizen
+nach stderr. Methodik wie oben (256 Queries, 1 Warmup + 5 timed Rounds, Median avg
+ms/Query). `build_ms` ist nur Nebenmetrik (einmalige Index-Konstruktion; Bulk vs.
+sequentielle Inserts).
+
+Fairness: Headline für Metrikraum = `mtree_needle_none` vs. vpsearch/vp_tree/ball_tree.
+`needle_hint` nutzt Seed-Wissen, das die anderen APIs nicht bekommen. kiddo/rstar sind
+Euclidean/spatial-Spezialisten (Obergrenze). kiddo 5.3 (ImmutableKdTree) statt 6.x wegen
+rustc-MSRV auf diesem Host; `generator` ist auf `0.8.11` gepinnt.
+
+Canvas (Daten inline nach dem Lauf):
+`canvases/knn-baseline-latency.canvas.tsx` neben dem Chat öffnen.
+
 ## Weitere Reports / Benches
 
 ```bash
