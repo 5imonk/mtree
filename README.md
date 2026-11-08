@@ -39,7 +39,7 @@ impl mtree::distance::Distance<(i64, i64)> for Euclid2d {
 }
 
 let mut tree = MTree::with_distance(Euclid2d);
-// Oder mit Größenhinweis (wählt min/max/split per √n-Heuristik):
+// Oder mit Größenhinweis (wählt min/max/split per √n-Heuristik, Clamp 16…64):
 // let mut tree = MTree::with_capacity_hint(10_000, Euclid2d);
 let id = tree.insert((1, 2), "Raum A".to_string()).unwrap();
 let _ = tree.insert((3, 4), "Raum B".to_string()).unwrap();

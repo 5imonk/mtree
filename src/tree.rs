@@ -291,14 +291,25 @@ impl Ord for KnnQueueEntry {
     }
 }
 
+/// Default `min_node_size` wenn kein Capacity-Hint gesetzt wird.
+pub const DEFAULT_MIN_NODE_SIZE: usize = 16;
+/// Default `max_node_size` wenn kein Capacity-Hint gesetzt wird.
+pub const DEFAULT_MAX_NODE_SIZE: usize = 64;
+/// Default `split_sampling` wenn kein Capacity-Hint gesetzt wird.
+pub const DEFAULT_SPLIT_SAMPLING: usize = 16;
+
 /// Empfohlene Knotenparameter `(min_node_size, max_node_size, split_sampling)`
 /// für einen Baum mit etwa `expected_entries` Einträgen.
 ///
-/// Heuristik: `max ≈ √n` (geclampt auf 8…100), `min = max(2, max/4)`,
+/// Heuristik: `max ≈ √n` (geclampt auf 16…64), `min = max(2, max/4)`,
 /// `split = clamp(max/4, 5, 20)`. Bei `expected_entries == 0` wie `n = 1`.
+///
+/// Das Plateau 16…64 folgt empirischen k-NN-Sweeps (Sweet-Spot um max≈48–64);
+/// ohne Größenhinweis nutzen die Konstruktoren
+/// [`DEFAULT_MIN_NODE_SIZE`] / [`DEFAULT_MAX_NODE_SIZE`] / [`DEFAULT_SPLIT_SAMPLING`].
 pub fn node_params_for_capacity(expected_entries: usize) -> (usize, usize, usize) {
     let n = expected_entries.max(1);
-    let max = ((n as f64).sqrt().round() as usize).clamp(8, 100);
+    let max = ((n as f64).sqrt().round() as usize).clamp(16, 64);
     let min = (max / 4).max(2);
     let split = (max / 4).clamp(5, 20);
     (min, max, split)
@@ -316,9 +327,9 @@ where
         F: Distance<K, Output = f64> + Send + Sync + 'static,
     {
         Self {
-            min_node_size: 5,
-            max_node_size: 100,
-            split_sampling: 20,
+            min_node_size: DEFAULT_MIN_NODE_SIZE,
+            max_node_size: DEFAULT_MAX_NODE_SIZE,
+            split_sampling: DEFAULT_SPLIT_SAMPLING,
             nodes: Vec::new(),
             root: None,
             by_id: Vec::new(),
@@ -339,9 +350,9 @@ where
     /// Erstellt einen neuen M-Tree mit benutzerdefinierter Distanzfunktion (monomorph).
     pub fn with_distance(distance_fn: F) -> Self {
         Self {
-            min_node_size: 5,
-            max_node_size: 100,
-            split_sampling: 20,
+            min_node_size: DEFAULT_MIN_NODE_SIZE,
+            max_node_size: DEFAULT_MAX_NODE_SIZE,
+            split_sampling: DEFAULT_SPLIT_SAMPLING,
             nodes: Vec::new(),
             root: None,
             by_id: Vec::new(),
@@ -390,9 +401,9 @@ where
 {
     pub fn new() -> Self {
         Self {
-            min_node_size: 5,
-            max_node_size: 100,
-            split_sampling: 20,
+            min_node_size: DEFAULT_MIN_NODE_SIZE,
+            max_node_size: DEFAULT_MAX_NODE_SIZE,
+            split_sampling: DEFAULT_SPLIT_SAMPLING,
             nodes: Vec::new(),
             root: None,
             by_id: Vec::new(),
@@ -411,9 +422,9 @@ where
 {
     pub fn new() -> Self {
         Self {
-            min_node_size: 5,
-            max_node_size: 100,
-            split_sampling: 20,
+            min_node_size: DEFAULT_MIN_NODE_SIZE,
+            max_node_size: DEFAULT_MAX_NODE_SIZE,
+            split_sampling: DEFAULT_SPLIT_SAMPLING,
             nodes: Vec::new(),
             root: None,
             by_id: Vec::new(),

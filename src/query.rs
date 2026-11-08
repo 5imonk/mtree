@@ -4,11 +4,10 @@
 
 use crate::distance::{Distance, DynDistance};
 use crate::entry::EntryId;
-use crate::node::{NodeId, NodePtr, ObjectNode};
+use crate::node::{NodeId, NodePtr};
 use crate::stats::NodeStats;
 use crate::tree::{metric_distance, metric_f64, DistanceType, MTree};
 use std::collections::BinaryHeap;
-use std::sync::Arc;
 
 /// Queue-Eintrag für Query-Traversierung (min-heap auf Lower Bound).
 struct QueueEntry {
@@ -131,6 +130,11 @@ where
         self.is_at_end
     }
 
+    /// Baum, auf dem die Query läuft (`None` bei leerer Query).
+    pub(crate) fn tree(&self) -> Option<&'a MTree<K, V, D, S, Dist>> {
+        self.tree
+    }
+
     fn find_next_leaf(&mut self) -> bool {
         let tree = match self.tree {
             Some(t) => t,
@@ -166,13 +170,10 @@ where
                 return true;
             }
 
-            let routing_ids: Vec<NodeId> = node
-                .children
-                .iter()
-                .filter_map(|child| child.as_routing_id())
-                .collect();
-
-            for child_id in routing_ids {
+            for child in &node.children {
+                let Some(child_id) = child.as_routing_id() else {
+                    continue;
+                };
                 let child_node = &tree.nodes[child_id.index()];
                 let covering_radius = child_node.covering_radius;
                 let tri_lb = crate::search::triangle_lower_bound(
@@ -216,7 +217,7 @@ where
     S: NodeStats<K, V>,
     Dist: Distance<K, Output = D>,
 {
-    pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
+    pub(crate) fn next_object(&mut self) -> Option<(EntryId, D)> {
         if self.is_at_end {
             return None;
         }
@@ -227,7 +228,8 @@ where
                 let leaf = &tree.nodes[leaf_id.index()];
 
                 while self.leaf_iterator < leaf.children.len() {
-                    if let NodePtr::Object(ref obj_node) = &leaf.children[self.leaf_iterator] {
+                    if let NodePtr::Object(oid) = leaf.children[self.leaf_iterator] {
+                        let obj_node = tree.object(oid);
                         let dist = metric_distance(
                             &tree.distance_fn,
                             obj_node.key(),
@@ -263,7 +265,7 @@ where
                         self.leaf_iterator += 1;
 
                         if dist_f64 > min_radius_f64 && dist_f64 <= max_radius_f64 {
-                            return Some((obj_node.clone(), dist));
+                            return Some((oid, dist));
                         }
                     } else {
                         self.leaf_iterator += 1;
@@ -291,7 +293,7 @@ where
     type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_object().map(|(node, dist)| (node.id, dist))
+        self.next_object()
     }
 }
 
@@ -379,6 +381,11 @@ where
         self.is_at_end
     }
 
+    /// Baum, auf dem die Query läuft (`None` bei leerer Query).
+    pub(crate) fn tree(&self) -> Option<&'a MTree<K, V, D, S, Dist>> {
+        self.tree
+    }
+
     fn find_next_leaf(&mut self) -> bool {
         let tree = match self.tree {
             Some(t) => t,
@@ -408,13 +415,10 @@ where
                 return true;
             }
 
-            let routing_ids: Vec<NodeId> = node
-                .children
-                .iter()
-                .filter_map(|child| child.as_routing_id())
-                .collect();
-
-            for child_id in routing_ids {
+            for child in &node.children {
+                let Some(child_id) = child.as_routing_id() else {
+                    continue;
+                };
                 let child_node = &tree.nodes[child_id.index()];
                 let covering_radius = child_node.covering_radius;
                 let tri_lb = crate::search::triangle_lower_bound(
@@ -456,7 +460,7 @@ where
     S: NodeStats<K, V>,
     Dist: Distance<K, Output = D>,
 {
-    pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
+    pub(crate) fn next_object(&mut self) -> Option<(EntryId, D)> {
         if self.is_at_end {
             return None;
         }
@@ -467,7 +471,8 @@ where
                 let leaf = &tree.nodes[leaf_id.index()];
 
                 while self.leaf_iterator < leaf.children.len() {
-                    if let NodePtr::Object(ref obj_node) = &leaf.children[self.leaf_iterator] {
+                    if let NodePtr::Object(oid) = leaf.children[self.leaf_iterator] {
+                        let obj_node = tree.object(oid);
                         let dist = metric_distance(
                             &tree.distance_fn,
                             obj_node.key(),
@@ -495,7 +500,7 @@ where
                         self.leaf_iterator += 1;
 
                         if dist_f64 <= radius_f64 {
-                            return Some((obj_node.clone(), dist));
+                            return Some((oid, dist));
                         }
                     } else {
                         self.leaf_iterator += 1;
@@ -523,6 +528,6 @@ where
     type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_object().map(|(node, dist)| (node.id, dist))
+        self.next_object()
     }
 }

@@ -115,12 +115,13 @@ mod tests {
     fn test_node_params_for_capacity() {
         assert_eq!(node_params_for_capacity(0), node_params_for_capacity(1));
         let (_min, max_100, _split) = node_params_for_capacity(100);
-        assert_eq!(max_100, 10);
+        // √100 = 10 → floor clamp 16
+        assert_eq!(max_100, 16);
         let (min, max, split) = node_params_for_capacity(100);
         assert_eq!(min, (max / 4).max(2));
         assert_eq!(split, (max / 4).clamp(5, 20));
         let (_, max_big, _) = node_params_for_capacity(1_000_000);
-        assert_eq!(max_big, 100);
+        assert_eq!(max_big, 64);
     }
 
     #[test]

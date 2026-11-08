@@ -23,7 +23,10 @@ mod tests;
 pub use entry::{DuplicateKey, EntryId, UpdateKeyError};
 pub use filtered::{FilteredQuery, FilteredRangeQuery};
 pub use search_config::{KnnConfig, RangeSearchConfig, SearchConfig};
-pub use tree::{node_params_for_capacity, MTree};
+pub use tree::{
+    node_params_for_capacity, MTree, DEFAULT_MAX_NODE_SIZE, DEFAULT_MIN_NODE_SIZE,
+    DEFAULT_SPLIT_SAMPLING,
+};
 pub use query::{Query, RangeQuery};
 pub use scratch::QueryScratch;
 pub use stats::NodeStats;

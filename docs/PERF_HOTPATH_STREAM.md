@@ -206,3 +206,12 @@ Dateien: `src/node.rs`, Search-Aufrufe.
 - Phase 1–2: oft deutliche Verbesserung.
 - Phase 3: weiterer Sprung (Per-Visit-Kosten).
 - Parität mit vpsearch bei n=100k ist kein Ziel; Clustering zählt Query+Replace-Throughput bei kleinem n.
+
+---
+
+## Weiterarbeit nach Phase 1–4
+
+Phase 1–4 sind auf diesem Branch weitgehend gelandet. **Nächster Agent-Handoff**
+(sdo-kompatibel: parallele `&self`-Queries behalten, kein `&mut`-Query):
+
+→ [`PERF_NEXT_SDO_SAFE.md`](PERF_NEXT_SDO_SAFE.md)

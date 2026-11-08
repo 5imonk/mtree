@@ -52,13 +52,14 @@ where
     type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((node, dist)) = self.inner.next_object() {
+        let tree = self.inner.tree()?;
+        while let Some((id, dist)) = self.inner.next_object() {
             let active = {
-                let guard = node.value.read().unwrap();
-                (self.is_active)(node.id, &*guard)
+                let guard = tree.object(id).value();
+                (self.is_active)(id, guard)
             };
             if active {
-                return Some((node.id, dist));
+                return Some((id, dist));
             }
         }
         None
@@ -109,13 +110,14 @@ where
     type Item = (EntryId, D);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((node, dist)) = self.inner.next_object() {
+        let tree = self.inner.tree()?;
+        while let Some((id, dist)) = self.inner.next_object() {
             let active = {
-                let guard = node.value.read().unwrap();
-                (self.is_active)(node.id, &*guard)
+                let guard = tree.object(id).value();
+                (self.is_active)(id, guard)
             };
             if active {
-                return Some((node.id, dist));
+                return Some((id, dist));
             }
         }
         None
