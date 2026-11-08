@@ -715,8 +715,9 @@ where
             if entry.upper_bound < min_prune {
                 continue;
             }
-            // LB-Best-First: alle weiteren Einträge haben ≥ aktuelle LB.
-            if best.len() >= k && entry.distance_bound > effective_max_relaxed {
+            // Auch bei best.len() < k ist effective_max = max_r: Subtrees jenseits
+            // der Annulus-Obergrenze überspringen. LB-Best-First → break.
+            if entry.distance_bound > effective_max_relaxed {
                 break;
             }
 

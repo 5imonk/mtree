@@ -568,7 +568,9 @@ where
             if entry.upper_bound < min_prune {
                 continue;
             }
-            if active_distances.len() >= k && entry.distance_bound > effective_max_relaxed {
+            // Auch ohne volle k Aktive: effective_max = max_r — Subtrees jenseits
+            // der Annulus-Obergrenze nicht expandieren. LB-Best-First → break.
+            if entry.distance_bound > effective_max_relaxed {
                 break;
             }
 
