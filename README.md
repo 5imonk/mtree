@@ -35,9 +35,6 @@ impl mtree::distance::Distance<(i64, i64)> for Euclid2d {
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
     }
-    fn clone_box(&self) -> Box<dyn mtree::distance::Distance<(i64, i64), Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
-    }
 }
 
 let mut tree = MTree::with_distance(Euclid2d);

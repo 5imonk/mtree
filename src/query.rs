@@ -2,6 +2,7 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
+use crate::distance::{Distance, DynDistance};
 use crate::entry::EntryId;
 use crate::node::{NodeId, NodePtr, ObjectNode};
 use crate::stats::NodeStats;
@@ -43,14 +44,15 @@ impl Ord for QueueEntry {
 }
 
 /// Query Iterator für Bereichssuchen
-pub struct Query<'a, K, V, D = f64, S = crate::stats::DescendantCounter>
+pub struct Query<'a, K, V, D = f64, S = crate::stats::DescendantCounter, Dist = DynDistance<K, D>>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
-    tree: Option<&'a MTree<K, V, D, S>>,
+    tree: Option<&'a MTree<K, V, D, S, Dist>>,
     needle: K,
     needle_eps: f64,
     min_radius: D,
@@ -62,12 +64,13 @@ where
     is_at_end: bool,
 }
 
-impl<'a, K, V, D, S> Query<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> Query<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     pub fn empty() -> Self {
         Self {
@@ -85,7 +88,7 @@ where
     }
 
     pub fn new(
-        tree: &'a MTree<K, V, D, S>,
+        tree: &'a MTree<K, V, D, S, Dist>,
         needle: K,
         needle_eps: f64,
         min_radius: D,
@@ -95,7 +98,7 @@ where
         let mut queue: BinaryHeap<QueueEntry> = BinaryHeap::new();
         let root_node = &tree.nodes[root.index()];
         let root_distance = metric_f64(
-            tree.distance_fn.as_ref(),
+            &tree.distance_fn,
             &root_node.key,
             root_node.epsilon,
             &needle,
@@ -182,7 +185,7 @@ where
                     continue;
                 }
                 let dist_f64 = metric_f64(
-                    tree.distance_fn.as_ref(),
+                    &tree.distance_fn,
                     &child_node.key,
                     child_node.epsilon,
                     &self.needle,
@@ -205,12 +208,13 @@ where
     }
 }
 
-impl<'a, K, V, D, S> Query<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> Query<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
         if self.is_at_end {
@@ -225,7 +229,7 @@ where
                 while self.leaf_iterator < leaf.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf.children[self.leaf_iterator] {
                         let dist = metric_distance(
-                            tree.distance_fn.as_ref(),
+                            &tree.distance_fn,
                             obj_node.key(),
                             obj_node.epsilon(),
                             &self.needle,
@@ -276,12 +280,13 @@ where
     }
 }
 
-impl<'a, K, V, D, S> Iterator for Query<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> Iterator for Query<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     type Item = (EntryId, D);
 
@@ -291,14 +296,15 @@ where
 }
 
 /// RangeQuery Iterator für Radius-Suchen
-pub struct RangeQuery<'a, K, V, D = f64, S = crate::stats::DescendantCounter>
+pub struct RangeQuery<'a, K, V, D = f64, S = crate::stats::DescendantCounter, Dist = DynDistance<K, D>>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
-    tree: Option<&'a MTree<K, V, D, S>>,
+    tree: Option<&'a MTree<K, V, D, S, Dist>>,
     needle: K,
     needle_eps: f64,
     radius: D,
@@ -309,12 +315,13 @@ where
     is_at_end: bool,
 }
 
-impl<'a, K, V, D, S> RangeQuery<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> RangeQuery<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     pub fn empty() -> Self {
         Self {
@@ -331,7 +338,7 @@ where
     }
 
     pub fn new(
-        tree: &'a MTree<K, V, D, S>,
+        tree: &'a MTree<K, V, D, S, Dist>,
         needle: K,
         needle_eps: f64,
         radius: D,
@@ -340,7 +347,7 @@ where
         let mut queue: BinaryHeap<QueueEntry> = BinaryHeap::new();
         let root_node = &tree.nodes[root.index()];
         let root_distance = metric_f64(
-            tree.distance_fn.as_ref(),
+            &tree.distance_fn,
             &root_node.key,
             root_node.epsilon,
             &needle,
@@ -419,7 +426,7 @@ where
                     continue;
                 }
                 let dist_f64 = metric_f64(
-                    tree.distance_fn.as_ref(),
+                    &tree.distance_fn,
                     &child_node.key,
                     child_node.epsilon,
                     &self.needle,
@@ -441,12 +448,13 @@ where
     }
 }
 
-impl<'a, K, V, D, S> RangeQuery<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> RangeQuery<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     pub(crate) fn next_object(&mut self) -> Option<(Arc<ObjectNode<K, V, S>>, D)> {
         if self.is_at_end {
@@ -461,7 +469,7 @@ where
                 while self.leaf_iterator < leaf.children.len() {
                     if let NodePtr::Object(ref obj_node) = &leaf.children[self.leaf_iterator] {
                         let dist = metric_distance(
-                            tree.distance_fn.as_ref(),
+                            &tree.distance_fn,
                             obj_node.key(),
                             obj_node.epsilon(),
                             &self.needle,
@@ -504,12 +512,13 @@ where
     }
 }
 
-impl<'a, K, V, D, S> Iterator for RangeQuery<'a, K, V, D, S>
+impl<'a, K, V, D, S, Dist> Iterator for RangeQuery<'a, K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     type Item = (EntryId, D);
 

@@ -61,12 +61,12 @@ pub(crate) fn is_seeded_leaf(from: Option<&KnnSeedCtx>, node: NodeId) -> bool {
 }
 
 /// Seed-Leaf zuerst bewerten: FromEntry mit Distanz 0, Hint mit echter Distanz.
-pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
+pub(crate) fn visit_seeded_leaf_objects<K, V, D, S, Dist>(
     leaf: &RoutingNode<K, V, S>,
     needle: &K,
     needle_eps: f64,
     from: &KnnSeedCtx,
-    distance_fn: &dyn Distance<K, Output = D>,
+    distance_fn: &Dist,
     pruning_radius: &Cell<f64>,
     mut on_object: impl FnMut(Arc<ObjectNode<K, V, S>>, f64),
 ) where
@@ -74,6 +74,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D> + ?Sized,
 {
     for child in &leaf.children {
         if let NodePtr::Object(obj) = child {
@@ -211,12 +212,13 @@ pub(crate) fn triangle_lower_bound(
     ((parent_center_dist - child_parent_distance).abs() - covering_radius).max(0.0)
 }
 
-impl<K, V, D, S> MTree<K, V, D, S>
+impl<K, V, D, S, Dist> MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync + Hash + Eq + Default,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V> + Default,
+    Dist: Distance<K, Output = D>,
 {
     /// Interne Annulus-Query (`min < dist ≤ max`), ohne Filter.
     pub(crate) fn query_annulus(
@@ -225,7 +227,7 @@ where
         needle_eps: f64,
         min_radius: D,
         max_radius: D,
-    ) -> Query<'_, K, V, D, S> {
+    ) -> Query<'_, K, V, D, S, Dist> {
         if let Some(root) = self.root {
             Query::new(
                 self,
@@ -246,7 +248,7 @@ where
         needle: &K,
         needle_eps: f64,
         radius: D,
-    ) -> RangeQuery<'_, K, V, D, S> {
+    ) -> RangeQuery<'_, K, V, D, S, Dist> {
         if let Some(root) = self.root {
             RangeQuery::new(self, needle.clone(), needle_eps, radius, root)
         } else {
@@ -259,7 +261,7 @@ where
         &'a self,
         needle: &K,
         config: impl IntoSearchConfig<'a, D, V>,
-    ) -> FilteredQuery<'a, K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+    ) -> FilteredQuery<'a, K, V, D, S, Dist, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_search_config();
         let inner = self.query_annulus(needle, cfg.epsilon, cfg.min_radius, cfg.max_radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
@@ -272,7 +274,7 @@ where
         &'a self,
         needle: &K,
         config: impl IntoRangeSearchConfig<'a, D, V>,
-    ) -> FilteredRangeQuery<'a, K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+    ) -> FilteredRangeQuery<'a, K, V, D, S, Dist, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_range_search_config();
         let inner = self.query_ball(needle, cfg.epsilon, cfg.radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
@@ -403,7 +405,7 @@ where
         from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.unwrap();
-        let distance_fn = self.distance_fn.as_ref();
+        let distance_fn = &self.distance_fn;
 
         // Nur bestätigte Objektdistanzen. Teilbaum-Oberschranken zählen nicht als Nachbar,
         // sonst fällt der Pruning-Radius unter die echte k-te Distanz.
@@ -627,7 +629,7 @@ where
         }
 
         let root = self.root.unwrap();
-        let distance_fn = self.distance_fn.as_ref();
+        let distance_fn = &self.distance_fn;
 
         let mut best: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
         let mut hits: BinaryHeap<KnnHitEntry<K, V, S>> = BinaryHeap::new();

@@ -45,18 +45,19 @@ fn skip_self(from: Option<&KnnSeedCtx>, id: EntryId) -> bool {
     from.map(|c| c.exclude_self() && c.id == id).unwrap_or(false)
 }
 
-fn object_dist<K, V, D, S>(
+fn object_dist<K, V, D, S, Dist>(
     obj: &ObjectNode<K, V, S>,
     needle: &K,
     needle_eps: f64,
     from: Option<&KnnSeedCtx>,
-    distance_fn: &dyn crate::distance::Distance<K, Output = D>,
+    distance_fn: &Dist,
 ) -> f64
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: crate::distance::Distance<K, Output = D> + ?Sized,
 {
     if from.map(|c| c.zero_dist_for(obj.id)).unwrap_or(false) {
         0.0
@@ -65,12 +66,13 @@ where
     }
 }
 
-impl<K, V, D, S> MTree<K, V, D, S>
+impl<K, V, D, S, Dist> MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync + Hash + Eq + Default,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V> + Default,
+    Dist: crate::distance::Distance<K, Output = D>,
 {
     /// k-NN mit Predicate: sucht bis `k` aktive Treffer gefunden sind.
     pub(crate) fn knn_search_filtered(
@@ -115,7 +117,7 @@ where
         from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let root = self.root.unwrap();
-        let distance_fn = self.distance_fn.as_ref();
+        let distance_fn = &self.distance_fn;
 
         let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
         let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();
@@ -435,7 +437,7 @@ where
         }
 
         let root = self.root.unwrap();
-        let distance_fn = self.distance_fn.as_ref();
+        let distance_fn = &self.distance_fn;
 
         let mut active_distances: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
         let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64, bool)> = Vec::new();

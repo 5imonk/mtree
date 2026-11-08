@@ -25,7 +25,7 @@ pub use search_config::{KnnConfig, RangeSearchConfig, SearchConfig};
 pub use tree::{node_params_for_capacity, MTree};
 pub use query::{Query, RangeQuery};
 pub use stats::NodeStats;
-pub use distance::{AsCoordinates, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
+pub use distance::{AsCoordinates, DynDistance, EuclideanDistance, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
 
 /// Crate-Version aus `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
