@@ -963,6 +963,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "knn_stats")]
+    fn test_knn_stats_counts_routing_nodes_when_filtered() {
+        let mut tree = new_tree_i64();
+        tree.insert((0, 0), "a".to_string()).unwrap();
+        tree.insert((1, 0), "b".to_string()).unwrap();
+        tree.insert((2, 0), "c".to_string()).unwrap();
+
+        crate::reset_knn_visit_stats();
+        let _hits = tree.knn_search(
+            &(0, 0),
+            2,
+            KnnConfig::new().with_active(|_id, v: &String| v != "b"),
+        );
+        let stats = crate::knn_visit_stats();
+        assert!(stats.routing_nodes > 0);
+        assert!(stats.leaves > 0);
+    }
+
+    #[test]
     fn test_range_search_config_filtered_by_value() {
         let mut tree = new_tree_i64();
         tree.insert((0, 0), "active:origin".to_string()).unwrap();
