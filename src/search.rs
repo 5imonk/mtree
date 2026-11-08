@@ -101,7 +101,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
                     KnnSeedMode::Hint => {
                         let pr = pruning_radius.get();
                         let dist =
-                            metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps);
+                            metric_f64(distance_fn, obj.key(), obj.epsilon(), needle, needle_eps);
                         if !(pr.is_finite() && dist > pr * UPPER_BOUND_FACTOR) {
                             on_object(obj.clone(), dist);
                         }
@@ -110,7 +110,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
                 continue;
             }
             let pr = pruning_radius.get();
-            let dist = metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps);
+            let dist = metric_f64(distance_fn, obj.key(), obj.epsilon(), needle, needle_eps);
             if pr.is_finite() && dist > pr * UPPER_BOUND_FACTOR {
                 continue;
             }
@@ -140,6 +140,89 @@ fn dist_as_f64<D: DistanceType>(d: D) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Max-Heap-Eintrag der k besten Treffer (größte Distanz oben → leichtes Evict).
+struct KnnHitEntry<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    dist: f64,
+    node: Arc<ObjectNode<K, V, S>>,
+}
+
+impl<K, V, S> PartialEq for KnnHitEntry<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.dist == other.dist
+    }
+}
+impl<K, V, S> Eq for KnnHitEntry<K, V, S> where S: NodeStats<K, V> {}
+impl<K, V, S> PartialOrd for KnnHitEntry<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.dist.partial_cmp(&other.dist)
+    }
+}
+impl<K, V, S> Ord for KnnHitEntry<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.dist
+            .partial_cmp(&other.dist)
+            .unwrap_or(Ordering::Equal)
+    }
+}
+
+fn note_knn_hit<K, V, S>(
+    hits: &mut BinaryHeap<KnnHitEntry<K, V, S>>,
+    best: &mut BinaryHeap<KnnDistanceKey>,
+    k: usize,
+    node: Arc<ObjectNode<K, V, S>>,
+    dist: f64,
+) where
+    S: NodeStats<K, V>,
+{
+    if best.len() < k {
+        best.push(KnnDistanceKey(dist));
+        hits.push(KnnHitEntry { dist, node });
+    } else if dist < best.peek().map(|d| d.0).unwrap_or(f64::INFINITY) {
+        best.pop();
+        best.push(KnnDistanceKey(dist));
+        hits.pop();
+        hits.push(KnnHitEntry { dist, node });
+    }
+}
+
+fn finish_knn_hits<K, V, S>(
+    hits: BinaryHeap<KnnHitEntry<K, V, S>>,
+) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)>
+where
+    S: NodeStats<K, V>,
+{
+    let mut out: Vec<_> = hits.into_iter().map(|h| (h.node, h.dist)).collect();
+    // Distanz primär; EntryId sekundär für deterministische Gleichstands-Ordnung.
+    out.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.0.id.slot_index().cmp(&b.0.id.slot_index()))
+    });
+    out
+}
+
+/// Triangle-Inequality-LB vor Distanzberechnung zum Kind.
+#[inline]
+pub(crate) fn triangle_lower_bound(
+    parent_center_dist: f64,
+    child_parent_distance: f64,
+    covering_radius: f64,
+) -> f64 {
+    ((parent_center_dist - child_parent_distance).abs() - covering_radius).max(0.0)
 }
 
 impl<K, V, D, S> MTree<K, V, D, S>
@@ -256,7 +339,6 @@ where
         if k == 0 {
             return Some(Vec::new());
         }
-        let key = obj.key();
         let needle_eps = obj.epsilon();
         let ctx = KnnSeedCtx {
             id,
@@ -265,7 +347,7 @@ where
         };
         let cfg = config.into_knn_config();
         Some(entry_hits(self.knn_search_dispatch(
-            &key,
+            obj.key(),
             needle_eps,
             k,
             cfg,
@@ -346,21 +428,13 @@ where
         // Nur bestätigte Objektdistanzen. Teilbaum-Oberschranken zählen nicht als Nachbar,
         // sonst fällt der Pruning-Radius unter die echte k-te Distanz.
         let mut best: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
-        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64)> = Vec::new();
+        let mut hits: BinaryHeap<KnnHitEntry<K, V, S>> = BinaryHeap::new();
         let prune_cell = Cell::new(f64::INFINITY);
         let confirmed_kth = |best: &BinaryHeap<KnnDistanceKey>| -> f64 {
             if best.len() >= k {
                 best.peek().map(|d| d.0).unwrap_or(f64::INFINITY)
             } else {
                 f64::INFINITY
-            }
-        };
-        let note = |best: &mut BinaryHeap<KnnDistanceKey>, dist: f64| {
-            if best.len() < k {
-                best.push(KnnDistanceKey(dist));
-            } else if dist < best.peek().map(|d| d.0).unwrap_or(f64::INFINITY) {
-                best.pop();
-                best.push(KnnDistanceKey(dist));
             }
         };
 
@@ -382,30 +456,37 @@ where
                     |obj, dist| {
                         let pruning_radius = confirmed_kth(&best);
                         if dist <= pruning_radius {
-                            results.push((obj, dist));
-                            note(&mut best, dist);
+                            note_knn_hit(&mut hits, &mut best, k, obj, dist);
                             prune_cell.set(confirmed_kth(&best));
                         }
                     },
                 );
                 drop(leaf_guard);
                 if Arc::ptr_eq(leaf, &root) {
-                    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-                    return results.into_iter().take(k).collect();
+                    return finish_knn_hits(hits);
                 }
             }
         }
 
-        let root_distance = {
+        let (root_distance, root_lb, root_ub) = {
             let root_guard = root.lock().unwrap();
-            metric_f64(distance_fn.as_ref(), &root_guard.key, root_guard.epsilon, needle, needle_eps)
+            let d = metric_f64(
+                distance_fn.as_ref(),
+                &root_guard.key,
+                root_guard.epsilon,
+                needle,
+                needle_eps,
+            );
+            let r = root_guard.covering_radius;
+            (d, (d - r).max(0.0), d + r)
         };
 
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_distance,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
 
         while let Some(entry) = pq.pop() {
@@ -415,6 +496,11 @@ where
             } else {
                 f64::INFINITY
             };
+
+            // Pop-Skip: LB der PQ-Priorität über k-ter Distanz → Rest der PQ ebenfalls.
+            if entry.distance_bound > pruning_radius_relaxed {
+                break;
+            }
 
             if is_seeded_leaf(from, &entry.node) {
                 continue;
@@ -440,15 +526,14 @@ where
                         } else {
                             metric_f64(
                                 distance_fn.as_ref(),
-                                &obj_node.key(),
+                                obj_node.key(),
                                 obj_node.epsilon(),
                                 needle,
                                 needle_eps,
                             )
                         };
                         if dist <= pruning_radius {
-                            results.push((obj_node.clone(), dist));
-                            note(&mut best, dist);
+                            note_knn_hit(&mut hits, &mut best, k, obj_node.clone(), dist);
                         }
                     }
                 }
@@ -458,6 +543,16 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    if tri_lb > pruning_radius_relaxed {
+                        continue;
+                    }
+
                     let center_dist = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -465,7 +560,6 @@ where
                         needle,
                         needle_eps,
                     );
-                    let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
 
@@ -476,14 +570,14 @@ where
                     pq.push(KnnQueueEntry {
                         node: routing_child.clone(),
                         center_distance: center_dist,
-                        distance_bound: upper_bound,
+                        distance_bound: lower_bound,
+                        upper_bound,
                     });
                 }
             }
         }
 
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        results.into_iter().take(k).collect()
+        finish_knn_hits(hits)
     }
 
     /// Fallback für nicht-f64 Distanztypen: alles sammeln, sortieren, filtern.
@@ -554,7 +648,7 @@ where
         let distance_fn = self.distance_fn.clone_box();
 
         let mut best: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
-        let mut results: Vec<(Arc<ObjectNode<K, V, S>>, f64)> = Vec::new();
+        let mut hits: BinaryHeap<KnnHitEntry<K, V, S>> = BinaryHeap::new();
         let prune_cell = Cell::new(f64::INFINITY);
 
         if let Some(ctx) = from {
@@ -585,15 +679,7 @@ where
                         if dist > effective_max_relaxed {
                             return;
                         }
-                        results.push((obj, dist));
-                        if best.len() < k {
-                            best.push(KnnDistanceKey(dist));
-                        } else if let Some(max) = best.peek() {
-                            if dist < max.0 {
-                                best.pop();
-                                best.push(KnnDistanceKey(dist));
-                            }
-                        }
+                        note_knn_hit(&mut hits, &mut best, k, obj, dist);
                         let kth = if best.len() >= k {
                             best.peek().map(|d| d.0).unwrap_or(f64::INFINITY)
                         } else {
@@ -604,22 +690,12 @@ where
                 );
                 drop(leaf_guard);
                 if Arc::ptr_eq(leaf, &root) {
-                    let final_cap = if best.len() >= k {
-                        best.peek().map(|d| d.0).unwrap_or(max_r).min(max_r)
-                    } else {
-                        max_r
-                    };
-                    results.retain(|(_, dist)| {
-                        let within_k = best.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-                        *dist > min_r && *dist <= max_r && within_k
-                    });
-                    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-                    return results.into_iter().take(k).collect();
+                    return finish_knn_hits(hits);
                 }
             }
         }
 
-        let (root_distance, root_upper) = {
+        let (root_distance, root_lb, root_ub) = {
             let root_guard = root.lock().unwrap();
             let d = metric_f64(
                 distance_fn.as_ref(),
@@ -628,14 +704,16 @@ where
                 needle,
                 needle_eps,
             );
-            (d, d + root_guard.covering_radius)
+            let r = root_guard.covering_radius;
+            (d, (d - r).max(0.0), d + r)
         };
 
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_upper,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
 
         while let Some(entry) = pq.pop() {
@@ -652,9 +730,10 @@ where
             };
             let min_prune = min_r * LOWER_BOUND_FACTOR;
 
-            if entry.distance_bound < min_prune {
+            if entry.upper_bound < min_prune {
                 continue;
             }
+            // LB-Best-First: alle weiteren Einträge haben ≥ aktuelle LB.
             if best.len() >= k && entry.distance_bound > effective_max_relaxed {
                 break;
             }
@@ -678,7 +757,7 @@ where
                         } else {
                             metric_f64(
                                 distance_fn.as_ref(),
-                                &obj_node.key(),
+                                obj_node.key(),
                                 obj_node.epsilon(),
                                 needle,
                                 needle_eps,
@@ -691,15 +770,7 @@ where
                             continue;
                         }
 
-                        results.push((obj_node.clone(), dist));
-                        if best.len() < k {
-                            best.push(KnnDistanceKey(dist));
-                        } else if let Some(max) = best.peek() {
-                            if dist < max.0 {
-                                best.pop();
-                                best.push(KnnDistanceKey(dist));
-                            }
-                        }
+                        note_knn_hit(&mut hits, &mut best, k, obj_node.clone(), dist);
                     }
                 }
                 continue;
@@ -708,6 +779,16 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    if tri_lb > effective_max_relaxed {
+                        continue;
+                    }
+
                     let center_dist = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -715,7 +796,6 @@ where
                         needle,
                         needle_eps,
                     );
-                    let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
 
@@ -729,24 +809,14 @@ where
                     pq.push(KnnQueueEntry {
                         node: routing_child.clone(),
                         center_distance: center_dist,
-                        distance_bound: upper_bound,
+                        distance_bound: lower_bound,
+                        upper_bound,
                     });
                 }
             }
         }
 
-        let final_cap = if best.len() >= k {
-            best.peek().map(|d| d.0).unwrap_or(max_r).min(max_r)
-        } else {
-            max_r
-        };
-
-        results.retain(|(_, dist)| {
-            let within_k = best.len() < k || *dist <= final_cap * UPPER_BOUND_FACTOR;
-            *dist > min_r && *dist <= max_r && within_k
-        });
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        results.into_iter().take(k).collect()
+        finish_knn_hits(hits)
     }
 
     fn knn_search_range_fallback(

@@ -9,14 +9,17 @@ use crate::node::{ObjectNode, RoutingNode, NodePtr};
 use crate::stats::NodeStats;
 use crate::tree::{metric_distance, metric_f64, DistanceType};
 
-/// Queue-Eintrag für Query-Traversierung
+/// Queue-Eintrag für Query-Traversierung (min-heap auf Lower Bound).
 struct QueueEntry<K, V, S>
 where
     S: NodeStats<K, V>,
 {
     node: Arc<Mutex<RoutingNode<K, V, S>>>,
     center_distance: f64,
+    /// Lower Bound — Ordnungskey der PQ.
     distance_bound: f64,
+    /// Upper Bound — Annulus-Pruning.
+    upper_bound: f64,
 }
 
 impl<K, V, S> PartialEq for QueueEntry<K, V, S>
@@ -101,20 +104,23 @@ where
         distance_fn: Box<dyn crate::distance::Distance<K, Output = D> + Send + Sync>,
     ) -> Self {
         let mut queue: BinaryHeap<QueueEntry<K, V, S>> = BinaryHeap::new();
-        let root_distance = {
+        let (root_distance, root_lb, root_ub) = {
             let root_guard = root.lock().unwrap();
-            metric_f64(
+            let d = metric_f64(
                 distance_fn.as_ref(),
                 &root_guard.key,
                 root_guard.epsilon,
                 &needle,
                 needle_eps,
-            )
+            );
+            let r = root_guard.covering_radius;
+            (d, (d - r).max(0.0), d + r)
         };
         queue.push(QueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_distance,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
         Self {
             needle,
@@ -136,6 +142,22 @@ where
     
     fn find_next_leaf(&mut self) -> bool {
         while let Some(entry) = self.queue.pop() {
+            let min_radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
+                unsafe { std::mem::transmute_copy(&self.min_radius) }
+            } else {
+                0.0
+            };
+            let max_radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
+                unsafe { std::mem::transmute_copy(&self.max_radius) }
+            } else {
+                f64::INFINITY
+            };
+            let min_prune = min_radius_f64 * crate::tree::LOWER_BOUND_FACTOR;
+            let max_prune = max_radius_f64 * crate::tree::UPPER_BOUND_FACTOR;
+            if entry.upper_bound < min_prune || entry.distance_bound >= max_prune {
+                continue;
+            }
+
             let node_guard = entry.node.lock().unwrap();
             
             if node_guard.is_leaf {
@@ -152,6 +174,16 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = crate::search::triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    // Grobe Triangle-LB: wenn schon zu weit für max, Distanz sparen.
+                    if tri_lb >= max_prune {
+                        continue;
+                    }
                     let dist_f64 = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -159,27 +191,15 @@ where
                         &self.needle,
                         self.needle_eps,
                     );
-                    let distance_bound = dist_f64 + child_guard.covering_radius;
-                    
-                    let min_radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                        unsafe { std::mem::transmute_copy(&self.min_radius) }
-                    } else {
-                        0.0
-                    };
-                    let max_radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                        unsafe { std::mem::transmute_copy(&self.max_radius) }
-                    } else {
-                        f64::INFINITY
-                    };
-                    let min_prune = min_radius_f64 * crate::tree::LOWER_BOUND_FACTOR;
-                    let max_prune = max_radius_f64 * crate::tree::UPPER_BOUND_FACTOR;
-                    let lower_bound = (dist_f64 - child_guard.covering_radius).max(0.0);
+                    let upper_bound = dist_f64 + covering_radius;
+                    let lower_bound = (dist_f64 - covering_radius).max(0.0);
                     // Annulus (min, max]: Subtree kann schneiden wenn upper > min und lower <= max
-                    if distance_bound >= min_prune && lower_bound < max_prune {
+                    if upper_bound >= min_prune && lower_bound < max_prune {
                         self.queue.push(QueueEntry {
                             node: routing_child.clone(),
                             center_distance: dist_f64,
-                            distance_bound,
+                            distance_bound: lower_bound,
+                            upper_bound,
                         });
                     }
                 }
@@ -209,7 +229,7 @@ where
                         let dist = match &self.distance_fn {
                             Some(df) => metric_distance(
                                 df.as_ref(),
-                                &obj_node.key(),
+                                obj_node.key(),
                                 obj_node.epsilon(),
                                 &self.needle,
                                 self.needle_eps,
@@ -312,20 +332,23 @@ where
         distance_fn: Box<dyn crate::distance::Distance<K, Output = D> + Send + Sync>,
     ) -> Self {
         let mut queue: BinaryHeap<QueueEntry<K, V, S>> = BinaryHeap::new();
-        let root_distance = {
+        let (root_distance, root_lb, root_ub) = {
             let root_guard = root.lock().unwrap();
-            metric_f64(
+            let d = metric_f64(
                 distance_fn.as_ref(),
                 &root_guard.key,
                 root_guard.epsilon,
                 &needle,
                 needle_eps,
-            )
+            );
+            let r = root_guard.covering_radius;
+            (d, (d - r).max(0.0), d + r)
         };
         queue.push(QueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_distance,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
         Self {
             needle,
@@ -346,6 +369,18 @@ where
     
     fn find_next_leaf(&mut self) -> bool {
         while let Some(entry) = self.queue.pop() {
+            let radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
+                unsafe { std::mem::transmute_copy(&self.radius) }
+            } else {
+                f64::INFINITY
+            };
+            let radius_prune = radius_f64 * crate::tree::UPPER_BOUND_FACTOR;
+            // LB-Pop-Skip; upper_bound bleibt für Annulus-Query relevant / Layout-Parität.
+            if entry.distance_bound > radius_prune {
+                continue;
+            }
+            let _ = entry.upper_bound;
+
             let node_guard = entry.node.lock().unwrap();
             
             if node_guard.is_leaf {
@@ -362,6 +397,15 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = crate::search::triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    if tri_lb > radius_prune {
+                        continue;
+                    }
                     let dist_f64 = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -369,19 +413,14 @@ where
                         &self.needle,
                         self.needle_eps,
                     );
-                    let distance_bound = dist_f64 + child_guard.covering_radius;
-                    
-                    let radius_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>() && std::mem::align_of::<D>() == std::mem::align_of::<f64>() {
-                        unsafe { std::mem::transmute_copy(&self.radius) }
-                    } else {
-                        f64::INFINITY
-                    };
-                    let radius_prune = radius_f64 * crate::tree::UPPER_BOUND_FACTOR;
-                    if dist_f64 <= radius_prune + child_guard.covering_radius {
+                    let lower_bound = (dist_f64 - covering_radius).max(0.0);
+                    let upper_bound = dist_f64 + covering_radius;
+                    if lower_bound <= radius_prune {
                         self.queue.push(QueueEntry {
                             node: routing_child.clone(),
                             center_distance: dist_f64,
-                            distance_bound,
+                            distance_bound: lower_bound,
+                            upper_bound,
                         });
                     }
                 }
@@ -411,7 +450,7 @@ where
                         let dist = match &self.distance_fn {
                             Some(df) => metric_distance(
                                 df.as_ref(),
-                                &obj_node.key(),
+                                obj_node.key(),
                                 obj_node.epsilon(),
                                 &self.needle,
                                 self.needle_eps,

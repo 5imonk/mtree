@@ -6,7 +6,9 @@
 
 use crate::entry::EntryId;
 use crate::node::{NodePtr, ObjectNode};
-use crate::search::{is_seeded_leaf, visit_seeded_leaf_objects, KnnSeedCtx};
+use crate::search::{
+    is_seeded_leaf, triangle_lower_bound, visit_seeded_leaf_objects, KnnSeedCtx,
+};
 use crate::stats::NodeStats;
 use crate::tree::{
     metric_f64, DistanceType, KnnDistanceKey, KnnQueueEntry, MTree, LOWER_BOUND_FACTOR,
@@ -63,7 +65,7 @@ where
     if from.map(|c| c.zero_dist_for(obj.id)).unwrap_or(false) {
         0.0
     } else {
-        metric_f64(distance_fn, &obj.key(), obj.epsilon(), needle, needle_eps)
+        metric_f64(distance_fn, obj.key(), obj.epsilon(), needle, needle_eps)
     }
 }
 
@@ -134,7 +136,7 @@ where
                 }
                 let active = {
                     let guard = obj.value.read().unwrap();
-                    is_active(obj.id, &guard.1)
+                    is_active(obj.id, &*guard)
                 };
                 if active {
                     results.push((obj, dist, true));
@@ -209,11 +211,18 @@ where
             )
         };
 
+        let (root_lb, root_ub) = {
+            let root_guard = root.lock().unwrap();
+            let r = root_guard.covering_radius;
+            ((root_distance - r).max(0.0), root_distance + r)
+        };
+
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_distance,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
 
         while let Some(entry) = pq.pop() {
@@ -231,9 +240,11 @@ where
                 f64::INFINITY
             };
 
-            // Oberschranke (Zentrum + Hülle) ist kein Stopp: ein zu kleiner Radius
-            // würde den Zweig mit dem echten k-ten Nachbarn abschneiden. Wie die plain
-            // Suche nur über die Unterschranke der Kinder ausdünnen.
+            // Pop-Skip auf LB (Best-First): Rest der PQ hat ≥ aktuelle LB.
+            if entry.distance_bound > pruning_radius_relaxed {
+                break;
+            }
+
             if is_seeded_leaf(from, &entry.node) {
                 continue;
             }
@@ -267,6 +278,16 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    if tri_lb > pruning_radius_relaxed {
+                        continue;
+                    }
+
                     let center_dist = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -274,7 +295,6 @@ where
                         needle,
                         needle_eps,
                     );
-                    let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
 
@@ -285,7 +305,8 @@ where
                     pq.push(KnnQueueEntry {
                         node: routing_child.clone(),
                         center_distance: center_dist,
-                        distance_bound: upper_bound,
+                        distance_bound: lower_bound,
+                        upper_bound,
                     });
                 }
             }
@@ -334,7 +355,7 @@ where
 
             let active = {
                 let guard = node.value.read().unwrap();
-                is_active(node.id, &guard.1)
+                is_active(node.id, &*guard)
             };
 
             if active {
@@ -441,7 +462,7 @@ where
                 }
                 let active = {
                     let guard = obj.value.read().unwrap();
-                    is_active(obj.id, &guard.1)
+                    is_active(obj.id, &*guard)
                 };
                 if active {
                     results.push((obj, dist, true));
@@ -513,7 +534,7 @@ where
             }
         }
 
-        let (root_distance, root_upper) = {
+        let (root_distance, root_lb, root_ub) = {
             let root_guard = root.lock().unwrap();
             let d = metric_f64(
                 distance_fn.as_ref(),
@@ -522,14 +543,16 @@ where
                 needle,
                 needle_eps,
             );
-            (d, d + root_guard.covering_radius)
+            let r = root_guard.covering_radius;
+            (d, (d - r).max(0.0), d + r)
         };
 
         let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
-            distance_bound: root_upper,
+            distance_bound: root_lb,
+            upper_bound: root_ub,
         });
 
         while let Some(entry) = pq.pop() {
@@ -549,11 +572,13 @@ where
             };
             let min_prune = min_r * LOWER_BOUND_FACTOR;
 
-            if entry.distance_bound < min_prune {
+            if entry.upper_bound < min_prune {
                 continue;
             }
+            if active_distances.len() >= k && entry.distance_bound > effective_max_relaxed {
+                break;
+            }
 
-            // Kein Abbruch über die Oberschranke; die untere Annulus-Schranke bleibt.
             if is_seeded_leaf(from, &entry.node) {
                 continue;
             }
@@ -587,6 +612,16 @@ where
             for child in &node_guard.children {
                 if let NodePtr::Routing(ref routing_child) = child {
                     let child_guard = routing_child.lock().unwrap();
+                    let covering_radius = child_guard.covering_radius;
+                    let tri_lb = triangle_lower_bound(
+                        entry.center_distance,
+                        child_guard.parent_distance,
+                        covering_radius,
+                    );
+                    if tri_lb > effective_max_relaxed {
+                        continue;
+                    }
+
                     let center_dist = metric_f64(
                         distance_fn.as_ref(),
                         &child_guard.key,
@@ -594,7 +629,6 @@ where
                         needle,
                         needle_eps,
                     );
-                    let covering_radius = child_guard.covering_radius;
                     let lower_bound = (center_dist - covering_radius).max(0.0);
                     let upper_bound = center_dist + covering_radius;
 
@@ -608,7 +642,8 @@ where
                     pq.push(KnnQueueEntry {
                         node: routing_child.clone(),
                         center_distance: center_dist,
-                        distance_bound: upper_bound,
+                        distance_bound: lower_bound,
+                        upper_bound,
                     });
                 }
             }
@@ -675,7 +710,7 @@ where
 
             let active = {
                 let guard = node.value.read().unwrap();
-                is_active(node.id, &guard.1)
+                is_active(node.id, &*guard)
             };
 
             if active {

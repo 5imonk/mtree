@@ -159,15 +159,18 @@ impl Ord for KnnDistanceKey {
     }
 }
 
-/// Queue-Eintrag für k-NN-Traversierung (min-heap: kleinster distance_bound zuerst)
+/// Queue-Eintrag für k-NN-Traversierung (min-heap: kleinste Lower Bound zuerst).
 pub(crate) struct KnnQueueEntry<K, V, S>
 where
     S: NodeStats<K, V>,
 {
     pub(crate) node: Arc<Mutex<RoutingNode<K, V, S>>>,
-    #[allow(dead_code)]
+    /// Distanz Query → Routing-Zentrum (für Triangle-Pruning der Kinder).
     pub(crate) center_distance: f64,
+    /// Lower Bound `(center - covering_radius).max(0)` — Ordnungskey der PQ.
     pub(crate) distance_bound: f64,
+    /// Upper Bound `center + covering_radius` — Annulus-/Range-Pruning.
+    pub(crate) upper_bound: f64,
 }
 impl<K, V, S> PartialEq for KnnQueueEntry<K, V, S>
 where
@@ -331,7 +334,7 @@ where
 
     /// Key des Eintrags, falls `id` noch belegt ist.
     pub fn key(&self, id: EntryId) -> Option<K> {
-        self.get(id).map(|node| node.key())
+        self.get(id).map(|node| node.key().clone())
     }
 
     /// Nutzdaten des Eintrags, falls `id` noch belegt ist.
@@ -460,7 +463,9 @@ where
             {
                 let mut root_guard = root_arc.lock().unwrap();
                 let entry_value = entry.value.read().unwrap();
-                root_guard.stats.add_descendant(&*entry_value);
+                root_guard
+                    .stats
+                    .add_descendant((entry.key(), &*entry_value));
                 drop(entry_value);
                 root_guard.children.push(NodePtr::Object(entry));
             }
@@ -482,12 +487,12 @@ where
             let mut node_guard = current.lock().unwrap();
 
             if node_guard.is_leaf {
-                let distance = self.metric(&node_guard.key, node_guard.epsilon, &key, entry.epsilon());
+                let distance = self.metric(&node_guard.key, node_guard.epsilon, key, entry.epsilon());
 
                 // Stats aktualisieren. Vorfahren erst nach dem Guard, damit kein Lock verschachtelt.
                 let ancestor = node_guard.parent.clone();
                 let entry_value = entry.value.read().unwrap();
-                node_guard.stats.add_descendant(&*entry_value);
+                node_guard.stats.add_descendant((key, &*entry_value));
                 drop(entry_value);
 
                 let distance_f64 = dist_value_as_f64(distance);
@@ -513,7 +518,9 @@ where
                 }
                 if let Some(ancestor) = ancestor {
                     let entry_value = entry.value.read().unwrap();
-                    self.adjust_ancestors(ancestor, |stats| stats.add_descendant(&*entry_value));
+                    self.adjust_ancestors(ancestor, |stats| {
+                        stats.add_descendant((key, &*entry_value))
+                    });
                 }
                 break;
             } else {
@@ -529,7 +536,7 @@ where
                         let dist = self.metric(
                             &child_guard.key,
                             child_guard.epsilon,
-                            &key,
+                            key,
                             entry.epsilon(),
                         );
                         let dist_f64 = if std::mem::size_of::<D>() == std::mem::size_of::<f64>()
@@ -925,13 +932,13 @@ where
                 for child in &node1.children {
                     if let NodePtr::Object(obj_node) = child {
                         let v = obj_node.value.read().unwrap();
-                        node1.stats.add_descendant(&*v);
+                        node1.stats.add_descendant((obj_node.key(), &*v));
                     }
                 }
                 for child in &node2.children {
                     if let NodePtr::Object(obj_node) = child {
                         let v = obj_node.value.read().unwrap();
-                        node2.stats.add_descendant(&*v);
+                        node2.stats.add_descendant((obj_node.key(), &*v));
                     }
                 }
             } else {
@@ -1129,7 +1136,7 @@ where
             Some(e) => e.clone(),
             None => return false,
         };
-        let key = entry.key();
+        let key = entry.key().clone();
         let identity_hash = entry.identity_hash();
 
         self.tree_erase(entry);
@@ -1171,7 +1178,7 @@ where
             Some(arc) => arc,
             None => return false,
         };
-        slot.value.write().unwrap().1 = value;
+        *slot.value.write().unwrap() = value;
         true
     }
 
@@ -1182,7 +1189,7 @@ where
             Some(e) => e.clone(),
             None => return Err(UpdateKeyError::NotFound),
         };
-        let old_key = entry.key();
+        let old_key = entry.key().clone();
         let identity_hash = entry.identity_hash();
 
         if new_key == old_key {
@@ -1207,10 +1214,7 @@ where
             .get(id.index())
             .and_then(|o| o.as_ref())
             .ok_or(UpdateKeyError::NotFound)?
-            .value
-            .write()
-            .unwrap()
-            .0 = new_key.clone();
+            .set_key(new_key.clone());
 
         self.index_remove(&old_key, identity_hash);
         self.index_try_insert(new_key, identity_hash, id)
@@ -1225,7 +1229,7 @@ where
         if let Some(root) = self.root.clone() {
             self.tree_insert(entry, root);
         } else {
-            let key = entry.key();
+            let key = entry.key().clone();
             let new_root = RoutingNode::with_routing(
                 key,
                 entry.epsilon(),
@@ -1237,7 +1241,9 @@ where
             {
                 let mut root_guard = root_arc.lock().unwrap();
                 let entry_value = entry.value.read().unwrap();
-                root_guard.stats.add_descendant(&*entry_value);
+                root_guard
+                    .stats
+                    .add_descendant((entry.key(), &*entry_value));
                 drop(entry_value);
                 root_guard.children.push(NodePtr::Object(entry));
             }
@@ -1264,7 +1270,9 @@ where
             // Aktualisiere Stats, danach die Vorfahren ohne gehaltenen Kind-Lock.
             let ancestor = parent_guard.parent.clone();
             let entry_value = entry.value.read().unwrap();
-            parent_guard.stats.remove_descendant(&*entry_value);
+            parent_guard
+                .stats
+                .remove_descendant((entry.key(), &*entry_value));
 
             // Prüfe ob furthest_descendant entfernt wurde
             let needs_radius_recompute =
@@ -1278,7 +1286,7 @@ where
             if let Some(ancestor) = ancestor {
                 if !Arc::ptr_eq(&ancestor, &parent_arc) {
                     self.adjust_ancestors(ancestor, |stats| {
-                        stats.remove_descendant(&*entry_value)
+                        stats.remove_descendant((entry.key(), &*entry_value))
                     });
                 }
             }
@@ -1481,7 +1489,9 @@ where
             if is_leaf {
                 if let NodePtr::Object(ref obj_node) = grandchild {
                     let v = obj_node.value.read().unwrap();
-                    from_guard.stats.remove_descendant(&*v);
+                    from_guard
+                        .stats
+                        .remove_descendant((obj_node.key(), &*v));
                 }
             } else {
                 if let NodePtr::Routing(ref routing_node) = grandchild {
@@ -1513,7 +1523,7 @@ where
             if let NodePtr::Object(ref obj_node) = grandchild {
                 let mut to_guard = to.lock().unwrap();
                 let v = obj_node.value.read().unwrap();
-                to_guard.stats.add_descendant(&*v);
+                to_guard.stats.add_descendant((obj_node.key(), &*v));
                 drop(to_guard);
             }
         } else if let NodePtr::Routing(ref routing_node) = grandchild {
@@ -1636,7 +1646,7 @@ where
             if is_leaf {
                 if let NodePtr::Object(ref obj_node) = child {
                     let v = obj_node.value.read().unwrap();
-                    to_guard.stats.add_descendant(&*v);
+                    to_guard.stats.add_descendant((obj_node.key(), &*v));
                 }
             }
             to_guard.children.push(child);

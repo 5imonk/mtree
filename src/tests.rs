@@ -73,6 +73,45 @@ mod tests {
         with_dist.into_iter().take(k).collect()
     }
 
+    /// Exact-kNN mit Toleranz für Gleichstände an der k-Grenze: Distanzfolgen müssen
+    /// übereinstimmen; Keys mit strikt kleinerer Distanz als k-te müssen identisch sein.
+    fn assert_knn_matches_naive_allowing_ties(
+        got: &[((i64, i64), f64)],
+        expected: &[((i64, i64), f64)],
+    ) {
+        assert_eq!(got.len(), expected.len());
+        let mut got_sorted = got.to_vec();
+        let mut exp_sorted = expected.to_vec();
+        got_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        exp_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, (g, e)) in got_sorted.iter().zip(exp_sorted.iter()).enumerate() {
+            assert!(
+                (g.1 - e.1).abs() < 1e-9,
+                "dist mismatch at i={i}: got {} vs {}",
+                g.1,
+                e.1
+            );
+        }
+        if expected.is_empty() {
+            return;
+        }
+        let kth = exp_sorted.last().unwrap().1;
+        let got_nearer: BTreeSet<_> = got_sorted
+            .iter()
+            .filter(|(_, d)| *d < kth - 1e-12)
+            .map(|(k, _)| *k)
+            .collect();
+        let exp_nearer: BTreeSet<_> = exp_sorted
+            .iter()
+            .filter(|(_, d)| *d < kth - 1e-12)
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(
+            got_nearer, exp_nearer,
+            "strictly nearer key sets differ"
+        );
+    }
+
     #[test]
     fn test_node_params_for_capacity() {
         assert_eq!(node_params_for_capacity(0), node_params_for_capacity(1));
@@ -220,7 +259,7 @@ mod tests {
         }
 
         for id in &ids {
-            let key = small.get(*id).unwrap().key();
+            let key = small.get(*id).unwrap().key().clone();
             for k in [1usize, 3, 5, 10] {
                 let with_self = small.knn_from_entry(*id, k, true, ()).unwrap();
                 assert!(!with_self.is_empty());
@@ -245,11 +284,16 @@ mod tests {
                     .filter(|(nk, _, _)| *nk != key)
                     .take(k)
                     .collect();
-                assert_eq!(without_wide.len(), expected.len());
-                for (a, b) in without_wide.iter().zip(expected.iter()) {
-                    assert_eq!(wide.key(a.0).unwrap(), b.0);
-                    assert!((a.1 - b.2).abs() < 1e-9);
-                }
+                assert_knn_matches_naive_allowing_ties(
+                    &without_wide
+                        .iter()
+                        .map(|(id, d)| (wide.key(*id).unwrap(), *d))
+                        .collect::<Vec<_>>(),
+                    &expected
+                        .iter()
+                        .map(|(nk, _, d)| (*nk, *d))
+                        .collect::<Vec<_>>(),
+                );
             }
         }
     }
@@ -477,34 +521,15 @@ mod tests {
             for k in k_values {
                 let mtree_results = tree.knn_search(&needle, k, ());
                 let naive_results = naive_knn_search(&vec_data, &needle, k);
-                assert_eq!(
-                    mtree_results.len(),
-                    naive_results.len(),
-                    "needle={:?} k={}",
-                    needle,
-                    k
-                );
-                for (i, ((node, dist), (key, _, naive_dist))) in
-                    mtree_results.iter().zip(naive_results.iter()).enumerate()
-                {
-                    assert_eq!(
-                        tree.key(*node).unwrap(),
-                        *key,
-                        "needle={:?} k={} i={}",
-                        needle,
-                        k,
-                        i
-                    );
-                    assert!(
-                        (dist - naive_dist).abs() < 1e-9,
-                        "needle={:?} k={} i={} dists {:?} vs {:?}",
-                        needle,
-                        k,
-                        i,
-                        dist,
-                        naive_dist
-                    );
-                }
+                let got: Vec<_> = mtree_results
+                    .iter()
+                    .map(|(id, d)| (tree.key(*id).unwrap(), *d))
+                    .collect();
+                let expected: Vec<_> = naive_results
+                    .iter()
+                    .map(|(nk, _, d)| (*nk, *d))
+                    .collect();
+                assert_knn_matches_naive_allowing_ties(&got, &expected);
             }
         }
     }
@@ -647,7 +672,7 @@ mod tests {
         let id = tree.insert((1, 2), "a".to_string()).unwrap();
         let node = tree.get(id).unwrap();
         assert_eq!(node.id, id);
-        assert_eq!(node.key(), (1, 2));
+        assert_eq!(*node.key(), (1, 2));
         assert_eq!(node.payload(), "a");
     }
 

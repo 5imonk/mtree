@@ -2,6 +2,7 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
+use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex, RwLock};
 use crate::entry::EntryId;
 use crate::stats::NodeStats;
@@ -22,7 +23,10 @@ where
     S: crate::stats::NodeStats<K, V>,
 {
     pub id: EntryId,
-    pub value: RwLock<(K, V)>,
+    /// Such-Key außerhalb des Payload-Locks (Distanz-Hotpath ohne Clone/Lock).
+    /// Mutation nur über [`ObjectNode::set_key`] unter exklusivem `MTree`-Borrow.
+    key: UnsafeCell<K>,
+    pub value: RwLock<V>,
     identity_hash: u64,
     epsilon: f64,
     parent: Mutex<Option<Arc<Mutex<RoutingNode<K, V, S>>>>>,
@@ -43,7 +47,8 @@ where
     pub fn with_identity(id: EntryId, key: K, value: V, identity_hash: u64, epsilon: f64) -> Self {
         Self {
             id,
-            value: RwLock::new((key, value)),
+            key: UnsafeCell::new(key),
+            value: RwLock::new(value),
             identity_hash,
             epsilon,
             parent: Mutex::new(None),
@@ -73,18 +78,24 @@ where
         *self.parent_distance.lock().unwrap()
     }
 
-    pub fn key(&self) -> K
-    where
-        K: Clone,
-    {
-        self.value.read().unwrap().0.clone()
+    pub fn key(&self) -> &K {
+        // SAFETY: Key wird nur unter `&mut MTree` geschrieben; parallele Reads sind API-seitig ausgeschlossen.
+        unsafe { &*self.key.get() }
+    }
+
+    /// Ersetzt den Key. Nur unter exklusivem `MTree`-Borrow aufrufen (z. B. `update_key`).
+    pub(crate) fn set_key(&self, new_key: K) {
+        // SAFETY: Aufrufer hält `&mut MTree`; keine parallelen `key()`-Reader.
+        unsafe {
+            *self.key.get() = new_key;
+        }
     }
 
     pub fn payload(&self) -> V
     where
         V: Clone,
     {
-        self.value.read().unwrap().1.clone()
+        self.value.read().unwrap().clone()
     }
 
     pub fn epsilon(&self) -> f64 {
@@ -203,7 +214,7 @@ where
         K: Clone,
     {
         match self {
-            NodePtr::Object(node) => node.key(),
+            NodePtr::Object(node) => node.key().clone(),
             NodePtr::Routing(node) => {
                 let node = node.lock().unwrap();
                 node.key.clone()

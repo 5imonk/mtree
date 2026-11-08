@@ -8,7 +8,7 @@ pub trait NodeStats<K, V>: Send + Sync {
     fn get_descendant_count(&self) -> usize;
     
     /// Fügt einen Nachkommen hinzu
-    fn add_descendant(&mut self, value: &(K, V));
+    fn add_descendant(&mut self, value: (&K, &V));
     
     /// Fügt mehrere Nachkommen hinzu
     fn add_descendants(&mut self, from: &Self);
@@ -17,7 +17,7 @@ pub trait NodeStats<K, V>: Send + Sync {
     fn remove_descendants(&mut self, from: &Self);
     
     /// Entfernt einen Nachkommen
-    fn remove_descendant(&mut self, value: &(K, V));
+    fn remove_descendant(&mut self, value: (&K, &V));
     
     /// Serialisierung (optional)
     fn serialize(&self, _os: &mut dyn std::io::Write) -> std::io::Result<()> {
@@ -47,7 +47,7 @@ impl<K, V> NodeStats<K, V> for DescendantCounter {
         self.descendants
     }
     
-    fn add_descendant(&mut self, _value: &(K, V)) {
+    fn add_descendant(&mut self, _value: (&K, &V)) {
         self.descendants += 1;
     }
     
@@ -59,7 +59,7 @@ impl<K, V> NodeStats<K, V> for DescendantCounter {
         self.descendants -= from.descendants;
     }
     
-    fn remove_descendant(&mut self, _value: &(K, V)) {
+    fn remove_descendant(&mut self, _value: (&K, &V)) {
         self.descendants -= 1;
     }
 }

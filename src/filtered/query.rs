@@ -48,7 +48,7 @@ where
         while let Some((node, dist)) = self.inner.next_object() {
             let active = {
                 let guard = node.value.read().unwrap();
-                (self.is_active)(node.id, &guard.1)
+                (self.is_active)(node.id, &*guard)
             };
             if active {
                 return Some((node.id, dist));
@@ -99,7 +99,7 @@ where
         while let Some((node, dist)) = self.inner.next_object() {
             let active = {
                 let guard = node.value.read().unwrap();
-                (self.is_active)(node.id, &guard.1)
+                (self.is_active)(node.id, &*guard)
             };
             if active {
                 return Some((node.id, dist));
