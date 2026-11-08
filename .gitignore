@@ -4,3 +4,26 @@
 
 # Local symlink to Cursor-managed canvases (~/.cursor/projects/.../canvases)
 /canvases
+
+*.csv 
+*.json
+*.png
+*.svg
+*.pdf
+*.html
+*.css
+*.js
+*.ts
+*.tsx
+*.jsx
+*.stderr
+*.stdout
+*.err
+*.out
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+*.log.*.*.*.*.*.*
