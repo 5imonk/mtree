@@ -10,6 +10,8 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 - **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 
+Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).
+
 ## Begriffe
 
 | | Rolle |
