@@ -1,6 +1,7 @@
 //! Thin harness crate: shared helpers for mtree benches and examples.
 
 use mtree::distance::Distance;
+use mtree::stats::DescendantCounter;
 use mtree::{
     node_params_for_capacity, reset_knn_visit_stats, take_knn_visit_stats, EntryId, KnnConfig,
     MTree,
@@ -13,6 +14,8 @@ use std::time::Instant;
 pub type Key2d = (i64, i64);
 /// Payload: `true` = active for filtered queries (~50% of inserts).
 pub type Active = bool;
+/// Monomorphe Experiment-Tree (Phase-4/5 Hotpath: keine DynDistance auf dem Query-Pfad).
+pub type ExperimentTree = MTree<Key2d, Active, f64, DescendantCounter, Euclid2d>;
 
 pub const QUERY_COUNT: usize = 256;
 pub const TIMED_ROUNDS: usize = 5;
@@ -31,9 +34,6 @@ impl Distance<Key2d> for Euclid2d {
         let dx = (a.0 - b.0) as f64;
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
-    }
-    fn clone_box(&self) -> Box<dyn Distance<Key2d, Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
     }
 }
 
@@ -122,7 +122,7 @@ pub fn gen_active_data(n: usize, seed: u64) -> Vec<(Key2d, Active)> {
     out
 }
 
-pub fn new_tree(policy: Policy, n: usize) -> MTree<Key2d, Active> {
+pub fn new_tree(policy: Policy, n: usize) -> ExperimentTree {
     match policy {
         Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
@@ -133,7 +133,7 @@ pub fn build_tree(
     policy: Policy,
     n: usize,
     data: &[(Key2d, Active)],
-) -> (MTree<Key2d, Active>, Vec<EntryId>) {
+) -> (ExperimentTree, Vec<EntryId>) {
     let mut tree = new_tree(policy, n);
     let mut ids = Vec::with_capacity(data.len());
     for &(key, active) in data {
@@ -152,7 +152,7 @@ pub fn sample_query_ids(ids: &[EntryId], count: usize, seed: u64) -> Vec<EntryId
 
 /// Prefetch keys so timed loops do not pay lookup cost unevenly across modes.
 pub fn prefetch_queries(
-    tree: &MTree<Key2d, Active>,
+    tree: &ExperimentTree,
     ids: &[EntryId],
 ) -> Vec<(EntryId, Key2d)> {
     ids.iter()
@@ -168,7 +168,7 @@ fn is_active(_id: EntryId, active: &Active) -> bool {
 }
 
 pub fn run_query_batch(
-    tree: &MTree<Key2d, Active>,
+    tree: &ExperimentTree,
     queries: &[(EntryId, Key2d)],
     k: usize,
     mode: QueryMode,
@@ -247,7 +247,7 @@ where
 
 /// Warmup once, then `rounds` timed passes; returns medians of per-query averages.
 pub fn measure_median(
-    tree: &MTree<Key2d, Active>,
+    tree: &ExperimentTree,
     queries: &[(EntryId, Key2d)],
     k: usize,
     mode: QueryMode,

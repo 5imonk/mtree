@@ -30,10 +30,9 @@ impl Distance<(i64, i64)> for Euclid2d {
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
     }
-    fn clone_box(&self) -> Box<dyn Distance<(i64, i64), Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
-    }
 }
+
+type Tree = mtree::MTree<(i64, i64), String, f64, mtree::stats::DescendantCounter, Euclid2d>;
 
 #[derive(Clone, Copy, Debug)]
 struct TreeParams {
@@ -79,7 +78,7 @@ impl Policy {
     }
 }
 
-fn new_tree(policy: Policy, n: usize) -> MTree<(i64, i64), String> {
+fn new_tree(policy: Policy, n: usize) -> Tree {
     match policy {
         Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
@@ -156,7 +155,7 @@ struct Row {
 }
 
 fn run_queries(
-    tree: &MTree<(i64, i64), String>,
+    tree: &Tree,
     needles: &[(i64, i64)],
     seed_ids: Option<&[EntryId]>,
     k: usize,
@@ -176,7 +175,7 @@ fn run_queries(
 }
 
 fn measure_with_seeds(
-    tree: &MTree<(i64, i64), String>,
+    tree: &Tree,
     needles: &[(i64, i64)],
     seed_ids: Option<&[EntryId]>,
     k: usize,
@@ -202,7 +201,7 @@ fn measure_with_seeds(
 }
 
 fn measure_random_mean(
-    tree: &MTree<(i64, i64), String>,
+    tree: &Tree,
     needles: &[(i64, i64)],
     ids: &[EntryId],
     k: usize,

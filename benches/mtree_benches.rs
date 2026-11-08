@@ -19,12 +19,11 @@ impl Distance<(i64, i64)> for Euclid2d {
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
     }
-    fn clone_box(&self) -> Box<dyn Distance<(i64, i64), Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
-    }
 }
 
-fn new_tree() -> MTree<(i64, i64), String> {
+type Tree = mtree::MTree<(i64, i64), String, f64, mtree::stats::DescendantCounter, Euclid2d>;
+
+fn new_tree() -> Tree {
     MTree::with_params(5, 100, 20, Euclid2d)
 }
 
@@ -340,7 +339,7 @@ fn bench_point_insert(c: &mut Criterion) {
         // Benchmark Point mit SIMD
         group.bench_with_input(BenchmarkId::new("point_simd", n), &point_data, |b, data| {
             b.iter_batched(
-                || MTree::<Point, String, f64>::with_distance(EuclideanDistance),
+                || MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance),
                 |mut tree| {
                     for (k, v) in data {
                         tree.insert(k.clone(), v.clone()).unwrap();
@@ -376,7 +375,7 @@ fn bench_point_range_search(c: &mut Criterion) {
         let point_data = gen_point_data(n, dims, 123);
         
         // Setup Point tree
-        let mut point_tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
+        let mut point_tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
             point_tree.insert(k.clone(), v.clone()).unwrap();
@@ -421,7 +420,7 @@ fn bench_point_knn_search(c: &mut Criterion) {
         let point_data = gen_point_data(n, dims, 789);
         
         // Setup Point tree
-        let mut point_tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
+        let mut point_tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
             point_tree.insert(k.clone(), v.clone()).unwrap();
@@ -466,7 +465,7 @@ fn bench_point_erase(c: &mut Criterion) {
             |b, (data, to_erase)| {
                 b.iter_batched(
                     || {
-                        let mut tree = MTree::<Point, String, f64>::with_distance(EuclideanDistance);
+                        let mut tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
                         for (k, v) in data {
                             tree.insert(k.clone(), v.clone()).unwrap();
                         }

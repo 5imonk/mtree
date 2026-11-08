@@ -26,10 +26,9 @@ impl Distance<(i64, i64)> for Euclid2d {
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
     }
-    fn clone_box(&self) -> Box<dyn Distance<(i64, i64), Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
-    }
 }
+
+type Tree = mtree::MTree<(i64, i64), String, f64, mtree::stats::DescendantCounter, Euclid2d>;
 
 #[derive(Clone, Copy)]
 enum Policy {
@@ -46,7 +45,7 @@ impl Policy {
     }
 }
 
-fn new_tree(policy: Policy, n: usize) -> MTree<(i64, i64), String> {
+fn new_tree(policy: Policy, n: usize) -> Tree {
     match policy {
         Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
@@ -84,7 +83,7 @@ fn gen_needles(count: usize, seed: u64) -> Vec<(i64, i64)> {
 }
 
 struct Prepared {
-    tree: MTree<(i64, i64), String>,
+    tree: Tree,
     ids: Vec<EntryId>,
     needles: Vec<(i64, i64)>,
     nearest_ids: Vec<EntryId>,
@@ -195,7 +194,7 @@ fn bench_knn_seed_hint(c: &mut Criterion) {
 }
 
 struct PreparedFromEntry {
-    tree: MTree<(i64, i64), String>,
+    tree: Tree,
     /// Sampled query entries with prefetched keys.
     queries: Vec<(EntryId, (i64, i64))>,
 }

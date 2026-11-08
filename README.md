@@ -48,6 +48,19 @@ rustc-MSRV auf diesem Host; `generator` ist auf `0.8.11` gepinnt.
 Canvas (Daten inline nach dem Lauf):
 `canvases/knn-baseline-latency.canvas.tsx` neben dem Chat öffnen.
 
+## Stream-Mix (Phase 5 / Query+Replace)
+
+Workload-nah für Stream-Clustering: n ∈ {50, 200, 1000}, Mixes `query_only` /
+`replace_only` / `query_replace` (`update_key`), Modes `needle_none` /
+`needle_hint`, k ∈ {1, 10}. Monomorphe Euclid2d-Distanz.
+
+```bash
+cargo run --release --example knn_stream_mix_report
+```
+
+Schreibt CSV nach `reports/knn_stream_mix.csv`. Canvas:
+`canvases/knn-stream-mix.canvas.tsx` (inkl. Hotpath-Phasenvergleich).
+
 ## Weitere Reports / Benches
 
 ```bash
