@@ -2,7 +2,7 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-//! Visit counters for plain k-NN (feature `knn_stats` only).
+//! Visit counters for plain and filtered k-NN (feature `knn_stats` only).
 //!
 //! Compiled out of default builds — no hot-path overhead without the feature.
 

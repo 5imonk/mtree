@@ -8,7 +8,7 @@ description = "High-performance M-Tree data structure with SIMD optimizations"
 
 [features]
 default = []
-# Compile-time visit counters for plain k-NN. Zero overhead when off.
+# Compile-time visit counters for plain and filtered k-NN. Zero overhead when off.
 knn_stats = []
 
 [lib]
