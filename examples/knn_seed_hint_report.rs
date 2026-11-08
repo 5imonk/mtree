@@ -7,7 +7,7 @@
 //!
 //! Uses `mtree` with feature `knn_stats` (enabled by this crate).
 //!
-//! Policies: `fixed` (5,100,20) vs `scaled` (`node_params_for_capacity(n)`).
+//! Policies: `fixed` (library default 16,64,16) vs `scaled` (`node_params_for_capacity(n)`).
 //! Modes: `none`, `nearest` (1-NN), `kth` (k-th NN), `random` (mean over 8 draws).
 
 use mtree::distance::Distance;
@@ -42,9 +42,9 @@ struct TreeParams {
 }
 
 const FIXED_PARAMS: TreeParams = TreeParams {
-    min_node_size: 5,
-    max_node_size: 100,
-    split_sampling: 20,
+    min_node_size: 16,
+    max_node_size: 64,
+    split_sampling: 16,
 };
 
 fn scaled_params(n: usize) -> TreeParams {
@@ -80,7 +80,7 @@ impl Policy {
 
 fn new_tree(policy: Policy, n: usize) -> Tree {
     match policy {
-        Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
+        Policy::Fixed => MTree::with_distance(Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
     }
 }

@@ -5,7 +5,7 @@
 // Groups:
 // - knn_seed_hint: space needles; modes none/nearest/kth/random
 // - knn_from_entry_vs_needle: stored entries; from_entry / needle_none / needle_hint
-// Policies: fixed (5,100,20) vs scaled (node_params_for_capacity(n)).
+// Policies: fixed (library default 16,64,16) vs scaled (node_params_for_capacity(n)).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use mtree::distance::Distance;
@@ -47,7 +47,7 @@ impl Policy {
 
 fn new_tree(policy: Policy, n: usize) -> Tree {
     match policy {
-        Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
+        Policy::Fixed => MTree::with_distance(Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
     }
 }

@@ -22,9 +22,15 @@ impl Distance<(i64, i64)> for Euclid2d {
 }
 
 type Tree = mtree::MTree<(i64, i64), String, f64, mtree::stats::DescendantCounter, Euclid2d>;
+type PointTree =
+    MTree<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>;
 
-fn new_tree() -> Tree {
-    MTree::with_params(5, 100, 20, Euclid2d)
+fn new_tree(n: usize) -> Tree {
+    MTree::with_capacity_hint(n, Euclid2d)
+}
+
+fn new_point_tree(n: usize) -> PointTree {
+    MTree::with_capacity_hint(n, EuclideanDistance)
 }
 
 /// Deterministic data: n unique points in [-10_000, 10_000)^2
@@ -100,7 +106,7 @@ fn bench_insert(c: &mut Criterion) {
         let data = gen_data(n, 42);
         group.bench_with_input(BenchmarkId::new("mtree", n), &data, |b, data| {
             b.iter_batched(
-                || new_tree(),
+                || new_tree(n),
                 |mut tree| {
                     for (k, v) in data {
                         tree.insert(*k, v.clone()).unwrap();
@@ -132,7 +138,7 @@ fn bench_range_search(c: &mut Criterion) {
     let radius = 200.0;
     for n in [100, 1_000, 10_000] {
         let data = gen_data(n, 123);
-        let mut tree = new_tree();
+        let mut tree = new_tree(n);
         for (k, v) in &data {
             tree.insert(*k, v.clone()).unwrap();
         }
@@ -171,7 +177,7 @@ fn bench_search_min_max(c: &mut Criterion) {
     let max_r = 300.0;
     for n in [100, 1_000, 10_000] {
         let data = gen_data(n, 456);
-        let mut tree = new_tree();
+        let mut tree = new_tree(n);
         for (k, v) in &data {
             tree.insert(*k, v.clone()).unwrap();
         }
@@ -209,7 +215,7 @@ fn bench_knn_search(c: &mut Criterion) {
     let k = 50;
     for n in [100, 1_000, 10_000] {
         let data = gen_data(n, 789);
-        let mut tree = new_tree();
+        let mut tree = new_tree(n);
         for (k, v) in &data {
             tree.insert(*k, v.clone()).unwrap();
         }
@@ -247,7 +253,7 @@ fn bench_erase(c: &mut Criterion) {
             |b, (data, to_erase)| {
                 b.iter_batched(
                     || {
-                        let mut tree = new_tree();
+                        let mut tree = new_tree(n);
                         for (k, v) in data {
                             tree.insert(*k, v.clone()).unwrap();
                         }
@@ -339,7 +345,7 @@ fn bench_point_insert(c: &mut Criterion) {
         // Benchmark Point mit SIMD
         group.bench_with_input(BenchmarkId::new("point_simd", n), &point_data, |b, data| {
             b.iter_batched(
-                || MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance),
+                || new_point_tree(n),
                 |mut tree| {
                     for (k, v) in data {
                         tree.insert(k.clone(), v.clone()).unwrap();
@@ -375,7 +381,7 @@ fn bench_point_range_search(c: &mut Criterion) {
         let point_data = gen_point_data(n, dims, 123);
         
         // Setup Point tree
-        let mut point_tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
+        let mut point_tree = new_point_tree(n);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
             point_tree.insert(k.clone(), v.clone()).unwrap();
@@ -420,7 +426,7 @@ fn bench_point_knn_search(c: &mut Criterion) {
         let point_data = gen_point_data(n, dims, 789);
         
         // Setup Point tree
-        let mut point_tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
+        let mut point_tree = new_point_tree(n);
         let point_needle = Point::new(vec![0.0, 0.0, 0.0]);
         for (k, v) in &point_data {
             point_tree.insert(k.clone(), v.clone()).unwrap();
@@ -465,7 +471,7 @@ fn bench_point_erase(c: &mut Criterion) {
             |b, (data, to_erase)| {
                 b.iter_batched(
                     || {
-                        let mut tree = MTree::<Point, String, f64, mtree::stats::DescendantCounter, EuclideanDistance>::with_distance(EuclideanDistance);
+                        let mut tree = new_point_tree(n);
                         for (k, v) in data {
                             tree.insert(k.clone(), v.clone()).unwrap();
                         }
@@ -488,7 +494,7 @@ fn bench_point_erase(c: &mut Criterion) {
 fn bench_entry_id_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("entry_id_ops");
     let data = gen_data(1_000, 42);
-    let mut tree = new_tree();
+    let mut tree = new_tree(data.len());
     let mut ids = Vec::with_capacity(data.len());
     for (k, v) in &data {
         ids.push(tree.insert(*k, v.clone()).unwrap());
@@ -506,7 +512,7 @@ fn bench_entry_id_ops(c: &mut Criterion) {
     group.bench_function("erase_by_id", |b| {
         b.iter_batched(
             || {
-                let mut t = new_tree();
+                let mut t = new_tree(200);
                 let mut stored = Vec::new();
                 for (k, v) in &data[..200] {
                     stored.push(t.insert(*k, v.clone()).unwrap());

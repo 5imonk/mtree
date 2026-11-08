@@ -12,7 +12,7 @@
 //! - `needle_none`: `knn_search(&key, k, ())` — Self included at dist 0
 //! - `needle_hint`: `knn_search(&key, k, KnnConfig::new().seed(id))` — Self included
 //!
-//! Policies: `fixed` (5,100,20) vs `scaled` (`node_params_for_capacity(n)`).
+//! Policies: `fixed` (library default 16,64,16) vs `scaled` (`node_params_for_capacity(n)`).
 
 use mtree::distance::Distance;
 use mtree::{node_params_for_capacity, EntryId, KnnConfig, MTree};
@@ -45,9 +45,9 @@ struct TreeParams {
 }
 
 const FIXED_PARAMS: TreeParams = TreeParams {
-    min_node_size: 5,
-    max_node_size: 100,
-    split_sampling: 20,
+    min_node_size: 16,
+    max_node_size: 64,
+    split_sampling: 16,
 };
 
 fn scaled_params(n: usize) -> TreeParams {
@@ -83,7 +83,7 @@ impl Policy {
 
 fn new_tree(policy: Policy, n: usize) -> Tree {
     match policy {
-        Policy::Fixed => MTree::with_params(5, 100, 20, Euclid2d),
+        Policy::Fixed => MTree::with_distance(Euclid2d),
         Policy::Scaled => MTree::with_capacity_hint(n, Euclid2d),
     }
 }
