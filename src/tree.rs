@@ -9,7 +9,6 @@ use crate::stats::{DescendantCounter, NodeStats};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::Arc;
 
 /// M-Tree Datenstruktur für effiziente Bereichs- und Nearest-Neighbor-Suche.
 ///
@@ -30,7 +29,7 @@ where
     /// bleiben als tote Einträge liegen (wie zuvor verwaiste Arcs).
     pub(crate) nodes: Vec<RoutingNode<K, V, S>>,
     pub(crate) root: Option<NodeId>,
-    by_id: Vec<Option<Arc<ObjectNode<K, V, S>>>>,
+    pub(crate) by_id: Vec<Option<ObjectNode<K, V, S>>>,
     free_list: Vec<usize>,
     key_index: HashMap<K, HashMap<u64, EntryId>>,
     entry_count: usize,
@@ -40,12 +39,12 @@ where
 impl<K, V, D, S, Dist> Clone for MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync + Hash + Eq,
-    V: Send + Sync,
+    V: Clone + Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V> + Clone,
     Dist: Distance<K, Output = D> + Clone,
 {
-    /// Klont die Routing-Arena und `by_id` (ObjectNodes bleiben über Arc geteilt).
+    /// Klont Routing-Arena und Objekt-Arena (`by_id`) tief (`V: Clone`).
     /// Parent-`NodeId`s bleiben gültig, solange die Arena 1:1 geklont wird.
     fn clone(&self) -> Self {
         Self {
@@ -54,7 +53,11 @@ where
             split_sampling: self.split_sampling,
             nodes: self.nodes.clone(),
             root: self.root,
-            by_id: self.by_id.clone(),
+            by_id: self
+                .by_id
+                .iter()
+                .map(|slot| slot.as_ref().map(|node| node.clone_node()))
+                .collect(),
             free_list: self.free_list.clone(),
             key_index: self.key_index.clone(),
             entry_count: self.entry_count,
@@ -142,6 +145,90 @@ where
     Dist: Distance<K, Output = D> + ?Sized,
 {
     dist_value_as_f64(metric_distance(distance_fn, a, eps_a, b, eps_b))
+}
+
+/// Objekt-Lookup nur über das `by_id`-Feld (erlaubt gleichzeitigen `&mut nodes`-Borrow).
+#[inline]
+pub(crate) fn obj_in<K, V, S>(
+    by_id: &[Option<ObjectNode<K, V, S>>],
+    id: EntryId,
+) -> &ObjectNode<K, V, S>
+where
+    S: NodeStats<K, V>,
+{
+    by_id[id.index()]
+        .as_ref()
+        .expect("EntryId verweist auf belegten Slot")
+}
+
+/// Zählt einen Nachkommen bei `start` und dessen Vorfahren. Eine Parent-Schleife bricht ab.
+fn adjust_ancestors_in<K, V, S, F>(nodes: &mut [RoutingNode<K, V, S>], start: NodeId, mut adjust: F)
+where
+    S: NodeStats<K, V>,
+    F: FnMut(&mut S),
+{
+    let mut current = start;
+    let mut seen: Vec<NodeId> = Vec::new();
+    loop {
+        if seen.contains(&current) {
+            return;
+        }
+        seen.push(current);
+        let parent = {
+            let node = &mut nodes[current.index()];
+            adjust(&mut node.stats);
+            node.parent
+        };
+        let Some(parent) = parent else {
+            return;
+        };
+        if parent == current || seen.contains(&parent) {
+            return;
+        }
+        current = parent;
+    }
+}
+
+/// Vergrößert die Hülle der Vorfahren auf `parent_distance + covering_radius`.
+/// Schrumpft nie. Stoppt, sobald ein Vorfahr schon abdeckt oder die Parent-Kette kreist.
+fn expand_cover_up_in<K, V, S>(nodes: &mut [RoutingNode<K, V, S>], start: NodeId)
+where
+    S: NodeStats<K, V>,
+{
+    let mut current = start;
+    let mut seen: Vec<NodeId> = Vec::new();
+
+    loop {
+        if seen.contains(&current) {
+            return;
+        }
+        seen.push(current);
+
+        let (parent, needed) = {
+            let node = &nodes[current.index()];
+            let Some(parent) = node.parent else {
+                return;
+            };
+            if parent == current || seen.contains(&parent) {
+                return;
+            }
+            (parent, node.parent_distance + node.covering_radius)
+        };
+
+        let grew = {
+            let parent_node = &mut nodes[parent.index()];
+            if needed > parent_node.covering_radius {
+                parent_node.covering_radius = needed;
+                true
+            } else {
+                false
+            }
+        };
+        if !grew {
+            return;
+        }
+        current = parent;
+    }
 }
 
 /// Leicht kleinere Schranke beim Pruning, um numerische Fehler zu vermeiden (Untergrenze).
@@ -374,8 +461,14 @@ where
         self.get(id).map(|node| node.epsilon())
     }
 
+    /// Objekt zu einer ID, die aus einem Leaf-`NodePtr::Object` stammt (muss belegt sein).
+    #[inline]
+    pub(crate) fn object(&self, id: EntryId) -> &ObjectNode<K, V, S> {
+        obj_in(&self.by_id, id)
+    }
+
     /// Liefert den Eintrag zur stabilen ID (O(1)).
-    pub(crate) fn get(&self, id: EntryId) -> Option<&Arc<ObjectNode<K, V, S>>> {
+    pub(crate) fn get(&self, id: EntryId) -> Option<&ObjectNode<K, V, S>> {
         self.by_id.get(id.index())?.as_ref()
     }
 }
@@ -416,23 +509,23 @@ where
         metric_distance(&self.distance_fn, a, eps_a, b, eps_b)
     }
 
-    fn child_key(&self, child: &NodePtr<K, V, S>) -> K {
+    fn child_key(&self, child: &NodePtr) -> K {
         match child {
-            NodePtr::Object(obj) => obj.key().clone(),
+            NodePtr::Object(id) => obj_in(&self.by_id, *id).key().clone(),
             NodePtr::Routing(id) => self.nodes[id.index()].key.clone(),
         }
     }
 
-    fn child_epsilon(&self, child: &NodePtr<K, V, S>) -> f64 {
+    fn child_epsilon(&self, child: &NodePtr) -> f64 {
         match child {
-            NodePtr::Object(obj) => obj.epsilon(),
+            NodePtr::Object(id) => obj_in(&self.by_id, *id).epsilon(),
             NodePtr::Routing(id) => self.nodes[id.index()].epsilon,
         }
     }
 
-    fn child_identity_hash(&self, child: &NodePtr<K, V, S>) -> u64 {
+    fn child_identity_hash(&self, child: &NodePtr) -> u64 {
         match child {
-            NodePtr::Object(obj) => obj.identity_hash(),
+            NodePtr::Object(id) => obj_in(&self.by_id, *id).identity_hash(),
             NodePtr::Routing(id) => self.nodes[id.index()].identity_hash,
         }
     }
@@ -493,73 +586,80 @@ where
 
         let epsilon = crate::distance::epsilon_from_hash(identity_hash);
         let id = self.alloc_slot();
-        let entry = Arc::new(ObjectNode::with_identity(
-            id,
-            key.clone(),
-            value,
-            identity_hash,
-            epsilon,
-        ));
+        let entry = ObjectNode::with_identity(id, key.clone(), value, identity_hash, epsilon);
 
-        if self.index_try_insert(key.clone(), identity_hash, id).is_err() {
+        if self.index_try_insert(key, identity_hash, id).is_err() {
             self.free_list.push(id.index());
             return Err(DuplicateKey);
         }
         self.entry_count += 1;
 
-        self.by_id[id.index()] = Some(entry.clone());
+        self.by_id[id.index()] = Some(entry);
 
         if let Some(root) = self.root {
-            self.tree_insert(entry, root);
+            self.tree_insert(id, root);
         } else {
-            let new_root = RoutingNode::with_routing(key.clone(), epsilon, identity_hash, true);
-            let root_id = self.alloc_routing(new_root);
-            entry.set_parent(Some(root_id), 0.0);
-            {
-                let root = &mut self.nodes[root_id.index()];
-                let entry_value = entry.value.read().unwrap();
-                root.stats.add_descendant((entry.key(), &*entry_value));
-                drop(entry_value);
-                root.children.push(NodePtr::Object(entry));
-            }
-            self.root = Some(root_id);
+            self.install_first_root(id);
         }
 
         Ok(id)
     }
 
-    fn tree_insert(&mut self, entry: Arc<ObjectNode<K, V, S>>, node_id: NodeId) {
-        let key = entry.key();
+    /// Legt den Wurzel-Leaf für den ersten Eintrag an.
+    fn install_first_root(&mut self, id: EntryId) {
+        let (key, epsilon, identity_hash) = {
+            let entry = obj_in(&self.by_id, id);
+            (entry.key().clone(), entry.epsilon(), entry.identity_hash())
+        };
+        let new_root = RoutingNode::with_routing(key, epsilon, identity_hash, true);
+        let root_id = self.alloc_routing(new_root);
+        let MTree { by_id, nodes, .. } = self;
+        let entry = obj_in(by_id, id);
+        entry.set_parent(Some(root_id), 0.0);
+        let root = &mut nodes[root_id.index()];
+        {
+            let entry_value = entry.value();
+            root.stats.add_descendant((entry.key(), entry_value));
+        }
+        root.children.push(NodePtr::Object(id));
+        self.root = Some(root_id);
+    }
+
+    fn tree_insert(&mut self, id: EntryId, node_id: NodeId) {
         let mut current = node_id;
 
         loop {
             let is_leaf = self.nodes[current.index()].is_leaf;
+            let entry = obj_in(&self.by_id, id);
+            let key = entry.key();
+            let entry_eps = entry.epsilon();
 
             if is_leaf {
                 let distance = self.metric(
-                    &self.nodes[current.index()].key.clone(),
+                    &self.nodes[current.index()].key,
                     self.nodes[current.index()].epsilon,
                     key,
-                    entry.epsilon(),
+                    entry_eps,
                 );
 
                 let ancestor = self.nodes[current.index()].parent;
-                let entry_value = entry.value.read().unwrap();
-                self.nodes[current.index()]
-                    .stats
-                    .add_descendant((key, &*entry_value));
-                drop(entry_value);
+                {
+                    let entry_value = entry.value();
+                    self.nodes[current.index()]
+                        .stats
+                        .add_descendant((key, entry_value));
+                }
 
                 let distance_f64 = dist_value_as_f64(distance);
                 let radius_grew = distance_f64 > self.nodes[current.index()].covering_radius;
                 if radius_grew {
                     self.nodes[current.index()].covering_radius = distance_f64;
-                    self.nodes[current.index()].furthest_descendant = Some(entry.id);
+                    self.nodes[current.index()].furthest_descendant = Some(id);
                 }
 
                 self.nodes[current.index()]
                     .children
-                    .push(NodePtr::Object(entry.clone()));
+                    .push(NodePtr::Object(id));
 
                 entry.set_parent(Some(current), distance_f64);
 
@@ -571,9 +671,10 @@ where
                 }
 
                 if let Some(ancestor) = ancestor {
-                    let entry_value = entry.value.read().unwrap();
-                    self.adjust_ancestors(ancestor, |stats| {
-                        stats.add_descendant((key, &*entry_value))
+                    let entry = obj_in(&self.by_id, id);
+                    let entry_value = entry.value();
+                    adjust_ancestors_in(&mut self.nodes, ancestor, |stats| {
+                        stats.add_descendant((entry.key(), entry_value))
                     });
                 }
                 break;
@@ -594,7 +695,7 @@ where
 
                 for child_id in routing_children {
                     let child = &self.nodes[child_id.index()];
-                    let dist = self.metric(&child.key, child.epsilon, key, entry.epsilon());
+                    let dist = self.metric(&child.key, child.epsilon, key, entry_eps);
                     let dist_f64 = dist_value_as_f64(dist);
                     let covering_radius = child.covering_radius;
 
@@ -643,70 +744,8 @@ where
         }
     }
 
-    /// Zählt einen Nachkommen bei `start` und dessen Vorfahren. Eine Parent-Schleife bricht ab.
-    fn adjust_ancestors<F>(&mut self, start: NodeId, mut adjust: F)
-    where
-        F: FnMut(&mut S),
-    {
-        let mut current = start;
-        let mut seen: Vec<NodeId> = Vec::new();
-        loop {
-            if seen.contains(&current) {
-                return;
-            }
-            seen.push(current);
-            let parent = {
-                let node = &mut self.nodes[current.index()];
-                adjust(&mut node.stats);
-                node.parent
-            };
-            let Some(parent) = parent else {
-                return;
-            };
-            if parent == current || seen.contains(&parent) {
-                return;
-            }
-            current = parent;
-        }
-    }
-
-    /// Vergrößert die Hülle der Vorfahren auf `parent_distance + covering_radius`.
-    /// Schrumpft nie. Stoppt, sobald ein Vorfahr schon abdeckt oder die Parent-Kette kreist.
     fn expand_cover_up(&mut self, start: NodeId) {
-        let mut current = start;
-        let mut seen: Vec<NodeId> = Vec::new();
-
-        loop {
-            if seen.contains(&current) {
-                return;
-            }
-            seen.push(current);
-
-            let (parent, needed) = {
-                let node = &self.nodes[current.index()];
-                let Some(parent) = node.parent else {
-                    return;
-                };
-                if parent == current || seen.contains(&parent) {
-                    return;
-                }
-                (parent, node.parent_distance + node.covering_radius)
-            };
-
-            let grew = {
-                let parent_node = &mut self.nodes[parent.index()];
-                if needed > parent_node.covering_radius {
-                    parent_node.covering_radius = needed;
-                    true
-                } else {
-                    false
-                }
-            };
-            if !grew {
-                return;
-            }
-            current = parent;
-        }
+        expand_cover_up_in(&mut self.nodes, start);
     }
 
     /// Covering-Radius für einen Arena-Knoten neu berechnen.
@@ -717,11 +756,11 @@ where
             let mut furthest: Option<EntryId> = None;
 
             for child in &self.nodes[node_id.index()].children {
-                if let NodePtr::Object(obj_node) = child {
-                    let pd = obj_node.dist_to_parent();
+                if let NodePtr::Object(oid) = child {
+                    let pd = obj_in(&self.by_id, *oid).dist_to_parent();
                     if pd > max_distance {
                         max_distance = pd;
-                        furthest = Some(obj_node.id);
+                        furthest = Some(*oid);
                     }
                 }
             }
@@ -768,11 +807,11 @@ where
             let mut furthest: Option<EntryId> = None;
 
             for child in &node.children {
-                if let NodePtr::Object(obj_node) = child {
-                    let pd = obj_node.dist_to_parent();
+                if let NodePtr::Object(oid) = child {
+                    let pd = obj_in(&self.by_id, *oid).dist_to_parent();
                     if pd > max_distance {
                         max_distance = pd;
-                        furthest = Some(obj_node.id);
+                        furthest = Some(*oid);
                     }
                 }
             }
@@ -808,7 +847,8 @@ where
         let children = self.nodes[node_id.index()].children.clone();
         for child in children {
             match child {
-                NodePtr::Object(obj_node) => {
+                NodePtr::Object(oid) => {
+                    let obj_node = obj_in(&self.by_id, oid);
                     obj_node.set_parent(Some(node_id), obj_node.dist_to_parent());
                 }
                 NodePtr::Routing(routing_id) => {
@@ -912,7 +952,7 @@ where
 
     fn promote_and_partition(
         &mut self,
-        children: Vec<NodePtr<K, V, S>>,
+        children: Vec<NodePtr>,
         node1: &mut RoutingNode<K, V, S>,
         node2: &mut RoutingNode<K, V, S>,
     ) {
@@ -958,15 +998,17 @@ where
 
             if node1.is_leaf {
                 for child in &node1.children {
-                    if let NodePtr::Object(obj_node) = child {
-                        let v = obj_node.value.read().unwrap();
-                        node1.stats.add_descendant((obj_node.key(), &*v));
+                    if let NodePtr::Object(oid) = child {
+                        let obj_node = obj_in(&self.by_id, *oid);
+                        let v = obj_node.value();
+                        node1.stats.add_descendant((obj_node.key(), v));
                     }
                 }
                 for child in &node2.children {
-                    if let NodePtr::Object(obj_node) = child {
-                        let v = obj_node.value.read().unwrap();
-                        node2.stats.add_descendant((obj_node.key(), &*v));
+                    if let NodePtr::Object(oid) = child {
+                        let obj_node = obj_in(&self.by_id, *oid);
+                        let v = obj_node.value();
+                        node2.stats.add_descendant((obj_node.key(), v));
                     }
                 }
             } else {
@@ -995,7 +1037,7 @@ where
         }
     }
 
-    fn promote(&self, children: &[NodePtr<K, V, S>]) -> (K, f64, u64, K, f64, u64) {
+    fn promote(&self, children: &[NodePtr]) -> (K, f64, u64, K, f64, u64) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -1024,7 +1066,7 @@ where
     fn partition(
         &mut self,
         from_leaf: bool,
-        from: &[NodePtr<K, V, S>],
+        from: &[NodePtr],
         to_1: &mut RoutingNode<K, V, S>,
         to_2: &mut RoutingNode<K, V, S>,
         estimated_radius_bound: D,
@@ -1111,15 +1153,16 @@ where
         to_2.children.clear();
 
         for (i, dist) in distances.iter().enumerate() {
-            let mut node = from[dist.index].clone();
+            let node = from[dist.index];
             let parent_distance = if i < boundary {
                 dist.from_1
             } else {
                 dist.from_2
             };
 
-            match &mut node {
-                NodePtr::Object(obj_node) => {
+            match node {
+                NodePtr::Object(oid) => {
+                    let obj_node = obj_in(&self.by_id, oid);
                     obj_node.set_parent(obj_node.parent(), parent_distance);
                 }
                 NodePtr::Routing(routing_id) => {
@@ -1145,14 +1188,12 @@ where
 
     /// Entfernt einen Eintrag anhand seiner stabilen ID.
     pub fn erase_by_id(&mut self, id: EntryId) -> bool {
-        let entry = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
-            Some(e) => e.clone(),
+        let (key, identity_hash) = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
+            Some(e) => (e.key().clone(), e.identity_hash()),
             None => return false,
         };
-        let key = entry.key().clone();
-        let identity_hash = entry.identity_hash();
 
-        self.tree_erase(entry);
+        self.tree_erase(id);
         self.index_remove(&key, identity_hash);
         self.release_slot(id);
         true
@@ -1188,21 +1229,19 @@ where
     /// Aktualisiert nur die Nutzdaten (O(1), Baum unverändert).
     pub fn update_value(&mut self, id: EntryId, value: V) -> bool {
         let slot = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
-            Some(arc) => arc,
+            Some(node) => node,
             None => return false,
         };
-        *slot.value.write().unwrap() = value;
+        slot.set_value(value);
         true
     }
 
     /// Verschiebt den Eintrag im Metrikraum (erase + reinsert, gleiche EntryId).
     pub fn update_key(&mut self, id: EntryId, new_key: K) -> Result<(), UpdateKeyError> {
-        let entry = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
-            Some(e) => e.clone(),
+        let (old_key, identity_hash) = match self.by_id.get(id.index()).and_then(|o| o.as_ref()) {
+            Some(e) => (e.key().clone(), e.identity_hash()),
             None => return Err(UpdateKeyError::NotFound),
         };
-        let old_key = entry.key().clone();
-        let identity_hash = entry.identity_hash();
 
         if new_key == old_key {
             return Ok(());
@@ -1218,7 +1257,7 @@ where
             }
         }
 
-        self.tree_erase(entry);
+        self.tree_erase(id);
 
         self.by_id
             .get(id.index())
@@ -1230,63 +1269,44 @@ where
         self.index_try_insert(new_key, identity_hash, id)
             .map_err(|_| UpdateKeyError::DuplicateKey)?;
 
-        let entry = self
-            .by_id
-            .get(id.index())
-            .and_then(|o| o.clone())
-            .ok_or(UpdateKeyError::NotFound)?;
+        if self.by_id.get(id.index()).and_then(|o| o.as_ref()).is_none() {
+            return Err(UpdateKeyError::NotFound);
+        }
 
         if let Some(root) = self.root {
-            self.tree_insert(entry, root);
+            self.tree_insert(id, root);
         } else {
-            let key = entry.key().clone();
-            let new_root = RoutingNode::with_routing(
-                key,
-                entry.epsilon(),
-                entry.identity_hash(),
-                true,
-            );
-            let root_id = self.alloc_routing(new_root);
-            entry.set_parent(Some(root_id), 0.0);
-            {
-                let root = &mut self.nodes[root_id.index()];
-                let entry_value = entry.value.read().unwrap();
-                root.stats
-                    .add_descendant((entry.key(), &*entry_value));
-                drop(entry_value);
-                root.children.push(NodePtr::Object(entry));
-            }
-            self.root = Some(root_id);
+            self.install_first_root(id);
         }
 
         Ok(())
     }
 
-    fn tree_erase(&mut self, entry: Arc<ObjectNode<K, V, S>>) {
+    fn tree_erase(&mut self, id: EntryId) {
+        let entry = obj_in(&self.by_id, id);
         if let Some(parent_id) = entry.parent() {
-            let entry_id = entry.id;
+            let entry_id = id;
             self.nodes[parent_id.index()].children.retain(|child| match child {
-                NodePtr::Object(obj_node) => obj_node.id != entry_id,
+                NodePtr::Object(oid) => *oid != entry_id,
                 _ => true,
             });
 
             let ancestor = self.nodes[parent_id.index()].parent;
-            let entry_value = entry.value.read().unwrap();
+            let entry_value = entry.value();
             self.nodes[parent_id.index()]
                 .stats
-                .remove_descendant((entry.key(), &*entry_value));
+                .remove_descendant((entry.key(), entry_value));
 
             let needs_radius_recompute =
                 self.nodes[parent_id.index()].furthest_descendant == Some(entry_id);
 
             if let Some(ancestor) = ancestor {
                 if ancestor != parent_id {
-                    self.adjust_ancestors(ancestor, |stats| {
-                        stats.remove_descendant((entry.key(), &*entry_value))
+                    adjust_ancestors_in(&mut self.nodes, ancestor, |stats| {
+                        stats.remove_descendant((entry.key(), entry_value))
                     });
                 }
             }
-            drop(entry_value);
 
             if needs_radius_recompute {
                 self.compute_node_radius(parent_id);
@@ -1410,8 +1430,8 @@ where
             let grandchild = from.children.remove(best_idx);
 
             let needs_recompute = if let Some(furthest_id) = from.furthest_descendant {
-                match &grandchild {
-                    NodePtr::Object(obj_node) => obj_node.id == furthest_id,
+                match grandchild {
+                    NodePtr::Object(oid) => oid == furthest_id,
                     NodePtr::Routing(_) => true,
                 }
             } else {
@@ -1419,9 +1439,10 @@ where
             };
 
             if is_leaf {
-                if let NodePtr::Object(ref obj_node) = grandchild {
-                    let v = obj_node.value.read().unwrap();
-                    from.stats.remove_descendant((obj_node.key(), &*v));
+                if let NodePtr::Object(oid) = grandchild {
+                    let obj_node = obj_in(&self.by_id, oid);
+                    let v = obj_node.value();
+                    from.stats.remove_descendant((obj_node.key(), v));
                 }
             }
 
@@ -1437,12 +1458,12 @@ where
             }
         }
 
-        match &grandchild {
-            NodePtr::Object(obj_node) => {
-                obj_node.set_parent(Some(to_id), nearest_dist_f64);
+        match grandchild {
+            NodePtr::Object(oid) => {
+                obj_in(&self.by_id, oid).set_parent(Some(to_id), nearest_dist_f64);
             }
             NodePtr::Routing(routing_id) => {
-                if *routing_id != to_id && *routing_id != from_id {
+                if routing_id != to_id && routing_id != from_id {
                     self.nodes[routing_id.index()].parent = Some(to_id);
                     self.nodes[routing_id.index()].parent_distance = nearest_dist_f64;
                 }
@@ -1450,14 +1471,15 @@ where
         }
 
         if is_leaf {
-            if let NodePtr::Object(ref obj_node) = grandchild {
-                let v = obj_node.value.read().unwrap();
+            if let NodePtr::Object(oid) = grandchild {
+                let obj_node = obj_in(&self.by_id, oid);
+                let v = obj_node.value();
                 self.nodes[to_id.index()]
                     .stats
-                    .add_descendant((obj_node.key(), &*v));
+                    .add_descendant((obj_node.key(), v));
             }
-        } else if let NodePtr::Routing(routing_id) = &grandchild {
-            if *routing_id != to_id {
+        } else if let NodePtr::Routing(routing_id) = grandchild {
+            if routing_id != to_id {
                 let child_stats = self.nodes[routing_id.index()].stats.clone();
                 self.nodes[to_id.index()]
                     .stats
@@ -1471,9 +1493,9 @@ where
             let is_furthest = is_leaf && nearest_dist_f64 > covering_before;
             to.children.push(grandchild);
             if is_furthest {
-                if let Some(NodePtr::Object(ref obj_node)) = to.children.last() {
+                if let NodePtr::Object(oid) = grandchild {
                     to.covering_radius = nearest_dist_f64;
-                    to.furthest_descendant = Some(obj_node.id);
+                    to.furthest_descendant = Some(oid);
                 }
             }
         }
@@ -1516,18 +1538,18 @@ where
 
         let children_to_move = std::mem::take(&mut self.nodes[from_id.index()].children);
 
-        for mut child in children_to_move {
+        for child in children_to_move {
             let child_key = self.child_key(&child);
             let child_eps = self.child_epsilon(&child);
             let new_parent_distance = self.metric(&to_key, to_eps, &child_key, child_eps);
             let new_parent_distance_f64 = dist_value_as_f64(new_parent_distance);
 
-            match &mut child {
-                NodePtr::Object(obj_node) => {
-                    obj_node.set_parent(Some(to_id), new_parent_distance_f64);
+            match child {
+                NodePtr::Object(oid) => {
+                    obj_in(&self.by_id, oid).set_parent(Some(to_id), new_parent_distance_f64);
                 }
                 NodePtr::Routing(routing_id) => {
-                    if *routing_id != to_id && *routing_id != from_id {
+                    if routing_id != to_id && routing_id != from_id {
                         self.nodes[routing_id.index()].parent = Some(to_id);
                         self.nodes[routing_id.index()].parent_distance = new_parent_distance_f64;
                     }
@@ -1535,28 +1557,26 @@ where
             }
 
             let is_furthest = if is_leaf {
-                matches!(&child, NodePtr::Object(_))
+                matches!(child, NodePtr::Object(_))
                     && new_parent_distance_f64 > self.nodes[to_id.index()].covering_radius
             } else {
                 false
             };
 
             if is_leaf {
-                if let NodePtr::Object(ref obj_node) = child {
-                    let v = obj_node.value.read().unwrap();
+                if let NodePtr::Object(oid) = child {
+                    let obj_node = obj_in(&self.by_id, oid);
+                    let v = obj_node.value();
                     self.nodes[to_id.index()]
                         .stats
-                        .add_descendant((obj_node.key(), &*v));
+                        .add_descendant((obj_node.key(), v));
                 }
             }
 
             self.nodes[to_id.index()].children.push(child);
 
             if is_furthest {
-                if let Some(NodePtr::Object(ref obj_node)) =
-                    self.nodes[to_id.index()].children.last()
-                {
-                    let id = obj_node.id;
+                if let NodePtr::Object(id) = child {
                     let to = &mut self.nodes[to_id.index()];
                     to.covering_radius = new_parent_distance_f64;
                     to.furthest_descendant = Some(id);

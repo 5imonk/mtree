@@ -3,7 +3,6 @@
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
 use std::cell::UnsafeCell;
-use std::sync::{Arc, RwLock};
 use crate::entry::EntryId;
 use crate::stats::NodeStats;
 
@@ -42,7 +41,9 @@ where
     /// Such-Key außerhalb des Payload-Locks (Distanz-Hotpath ohne Clone/Lock).
     /// Mutation nur über [`ObjectNode::set_key`] unter exklusivem `MTree`-Borrow.
     key: UnsafeCell<K>,
-    pub value: RwLock<V>,
+    /// Payload ohne Lock. Mutation nur über [`ObjectNode::set_value`] unter exklusivem
+    /// `MTree`-Borrow; parallele Reads unter `&MTree` sind erlaubt.
+    value: UnsafeCell<V>,
     identity_hash: u64,
     epsilon: f64,
     /// Leaf-Parent in der Routing-Arena.
@@ -67,7 +68,7 @@ where
         Self {
             id,
             key: UnsafeCell::new(key),
-            value: RwLock::new(value),
+            value: UnsafeCell::new(value),
             identity_hash,
             epsilon,
             parent: UnsafeCell::new(None),
@@ -82,12 +83,13 @@ where
     S: crate::stats::NodeStats<K, V>,
 {
     pub fn parent(&self) -> Option<NodeId> {
-        // SAFETY: Parent wird nur unter `&mut MTree` geschrieben.
+        // SAFETY: Write nur unter `&mut MTree`. Parallele Reads unter shared `&MTree`
+        // sind erlaubt — der Borrow-Checker schließt Writer aus.
         unsafe { *self.parent.get() }
     }
 
     pub fn set_parent(&self, parent: Option<NodeId>, distance: f64) {
-        // SAFETY: Aufrufer hält `&mut MTree`.
+        // SAFETY: Aufrufer hält `&mut MTree` (exklusiv); keine parallelen Reader möglich.
         unsafe {
             *self.parent.get() = parent;
             *self.parent_distance.get() = distance;
@@ -95,20 +97,35 @@ where
     }
 
     pub fn dist_to_parent(&self) -> f64 {
-        // SAFETY: siehe `parent`.
+        // SAFETY: siehe `parent` — shared Reads OK, Write nur unter `&mut MTree`.
         unsafe { *self.parent_distance.get() }
     }
 
     pub fn key(&self) -> &K {
-        // SAFETY: Key wird nur unter `&mut MTree` geschrieben; parallele Reads sind API-seitig ausgeschlossen.
+        // SAFETY: Write nur unter `&mut MTree`. Parallele Key-Reads unter shared `&MTree`
+        // sind erlaubt und gewollt (Query-Hotpath); Borrow-Checker schließt Writer aus.
         unsafe { &*self.key.get() }
     }
 
     /// Ersetzt den Key. Nur unter exklusivem `MTree`-Borrow aufrufen (z. B. `update_key`).
     pub(crate) fn set_key(&self, new_key: K) {
-        // SAFETY: Aufrufer hält `&mut MTree`; keine parallelen `key()`-Reader.
+        // SAFETY: Aufrufer hält `&mut MTree` (exklusiv); keine parallelen `key()`-Reader möglich.
         unsafe {
             *self.key.get() = new_key;
+        }
+    }
+
+    pub fn value(&self) -> &V {
+        // SAFETY: Write nur unter `&mut MTree`. Parallele Reads unter shared `&MTree`
+        // sind erlaubt (Filter-/Payload-Hotpath); Borrow-Checker schließt Writer aus.
+        unsafe { &*self.value.get() }
+    }
+
+    /// Ersetzt das Payload. Nur unter exklusivem `MTree`-Borrow aufrufen (`update_value`).
+    pub(crate) fn set_value(&self, new_value: V) {
+        // SAFETY: Aufrufer hält `&mut MTree` (exklusiv); keine parallelen `value()`-Reader möglich.
+        unsafe {
+            *self.value.get() = new_value;
         }
     }
 
@@ -116,7 +133,25 @@ where
     where
         V: Clone,
     {
-        self.value.read().unwrap().clone()
+        self.value().clone()
+    }
+
+    /// Tiefer Klon (Key, Payload, Parent-Metadaten). Nur für `MTree::clone`.
+    pub(crate) fn clone_node(&self) -> Self
+    where
+        K: Clone,
+        V: Clone,
+    {
+        Self {
+            id: self.id,
+            key: UnsafeCell::new(self.key().clone()),
+            value: UnsafeCell::new(self.value().clone()),
+            identity_hash: self.identity_hash,
+            epsilon: self.epsilon,
+            parent: UnsafeCell::new(self.parent()),
+            parent_distance: UnsafeCell::new(self.dist_to_parent()),
+            _stats: std::marker::PhantomData,
+        }
     }
 
     pub fn epsilon(&self) -> f64 {
@@ -133,7 +168,7 @@ pub struct RoutingNode<K, V, S = crate::stats::DescendantCounter>
 where
     S: NodeStats<K, V>,
 {
-    pub children: Vec<NodePtr<K, V, S>>,
+    pub children: Vec<NodePtr>,
     pub is_leaf: bool,
     pub key: K,
     pub epsilon: f64,
@@ -143,6 +178,7 @@ where
     pub furthest_descendant: Option<EntryId>,
     pub parent: Option<NodeId>,
     pub parent_distance: f64,
+    _value: std::marker::PhantomData<fn() -> V>,
 }
 
 unsafe impl<K: Send, V: Send, S: Send> Send for RoutingNode<K, V, S> where S: NodeStats<K, V> {}
@@ -165,6 +201,7 @@ where
             furthest_descendant: self.furthest_descendant,
             parent: self.parent,
             parent_distance: self.parent_distance,
+            _value: std::marker::PhantomData,
         }
     }
 }
@@ -186,6 +223,7 @@ where
             furthest_descendant: None,
             parent: None,
             parent_distance: 0.0,
+            _value: std::marker::PhantomData,
         }
     }
 
@@ -206,6 +244,7 @@ where
             furthest_descendant: None,
             parent: None,
             parent_distance: 0.0,
+            _value: std::marker::PhantomData,
         }
     }
 }
@@ -224,42 +263,24 @@ where
     }
 }
 
-/// Zeiger auf einen Knoten (Object in `by_id`, Routing in der Arena)
-pub enum NodePtr<K, V, S = crate::stats::DescendantCounter>
-where
-    S: NodeStats<K, V>,
-{
-    Object(Arc<ObjectNode<K, V, S>>),
+/// Zeiger auf einen Knoten (Object-ID in `by_id`, Routing-ID in der Routing-Arena).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodePtr {
+    Object(EntryId),
     Routing(NodeId),
 }
 
-impl<K, V, S> Clone for NodePtr<K, V, S>
-where
-    S: NodeStats<K, V>,
-{
-    fn clone(&self) -> Self {
-        match self {
-            NodePtr::Object(node) => NodePtr::Object(node.clone()),
-            NodePtr::Routing(id) => NodePtr::Routing(*id),
-        }
-    }
-}
-
-unsafe impl<K: Send, V: Send, S: Send> Send for NodePtr<K, V, S> where S: NodeStats<K, V> {}
-unsafe impl<K: Sync, V: Sync, S: Sync> Sync for NodePtr<K, V, S> where S: NodeStats<K, V> {}
-
-impl<K, V, S> NodePtr<K, V, S>
-where
-    S: NodeStats<K, V>,
-{
+impl NodePtr {
+    #[inline]
     #[allow(dead_code)]
-    pub fn as_object(&self) -> Option<&Arc<ObjectNode<K, V, S>>> {
+    pub fn as_object_id(&self) -> Option<EntryId> {
         match self {
-            NodePtr::Object(node) => Some(node),
+            NodePtr::Object(id) => Some(*id),
             _ => None,
         }
     }
 
+    #[inline]
     #[allow(dead_code)]
     pub fn as_routing_id(&self) -> Option<NodeId> {
         match self {

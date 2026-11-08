@@ -5,12 +5,13 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 ## Features
 
 - **SIMD-optimierte Distanzberechnungen**: Nutzt portable-simd für vektorisierte euklidische Distanzen
-- **Ownership-Modell**: Ein Owner pro Baum — Mutation unter `&mut MTree`, Query unter `&self` ohne per-node Locks (Arena + `NodeId`)
-- **Parallelität**: Externe Sync oder eigene Bäume/Shards; kein shared concurrent Mutate desselben Baums
+- **Ownership-Modell**: Mutation nur unter `&mut MTree`; Queries unter `&self` ohne per-node Locks (Arena + `NodeId`)
+- **Parallelität**: Viele parallele Reader (`&MTree`) sind erlaubt und gewollt (z. B. Rayon). Writer nur exklusiv (`&mut MTree`); kein concurrent Mutate desselben Baums — sonst externe Sync oder eigene Bäume/Shards
 - **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 
-Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).
+Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).  
+Fortsetzung (sdo-sicher, nach Phase 1–4): [`docs/PERF_NEXT_SDO_SAFE.md`](docs/PERF_NEXT_SDO_SAFE.md).
 
 ## Begriffe
 
