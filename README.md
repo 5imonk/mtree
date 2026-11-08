@@ -164,7 +164,7 @@ Für Float-Vektoren als Key: `mtree::distance::Point` verwenden (`Hash` + `Eq` a
 
 ## Version
 
-`1.0.0`, auch als `mtree::VERSION`. Ab `1.0` sind Brüche an dieser API `2.0`, kompatible Fixes `1.0.z`. Das Changelog steht in `CHANGELOG.md`.
+`2.0.0`, auch als `mtree::VERSION`. Ab `2.0` sind Brüche an dieser API `3.0`, kompatible Erweiterungen `2.x`, Fixes `2.0.z`. Das Changelog steht in `CHANGELOG.md`.
 
 ## Lizenz
 
