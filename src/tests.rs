@@ -7,7 +7,7 @@ mod tests {
     use crate::{KnnConfig, RangeSearchConfig, SearchConfig};
     use std::collections::BTreeSet;
 
-    /// Euklidische Distanz für (i64, i64) – implementiert clone_box für search/range_search
+    /// Euklidische Distanz für (i64, i64)
     #[derive(Clone)]
     struct Euclid2d;
     impl Distance<(i64, i64)> for Euclid2d {
@@ -17,12 +17,11 @@ mod tests {
             let dy = (a.1 - b.1) as f64;
             (dx * dx + dy * dy).sqrt()
         }
-        fn clone_box(&self) -> Box<dyn Distance<(i64, i64), Output = f64> + Send + Sync> {
-            Box::new(Euclid2d)
-        }
     }
 
-    fn new_tree_i64() -> MTree<(i64, i64), String> {
+    type TreeI64 = MTree<(i64, i64), String, f64, crate::stats::DescendantCounter, Euclid2d>;
+
+    fn new_tree_i64() -> TreeI64 {
         MTree::with_params(5, 100, 20, Euclid2d)
     }
 
@@ -145,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_empty_tree() {
-        let tree: MTree<(i64, i64), String> = MTree::with_params(5, 100, 20, Euclid2d);
+        let tree: TreeI64 = MTree::with_params(5, 100, 20, Euclid2d);
         assert!(tree.is_empty());
         assert_eq!(tree.size(), 0);
     }
@@ -452,7 +451,7 @@ mod tests {
 
     fn build_tree_and_vec(
         data: &[((i64, i64), String)],
-    ) -> (MTree<(i64, i64), String>, Vec<((i64, i64), String)>) {
+    ) -> (TreeI64, Vec<((i64, i64), String)>) {
         let mut tree = new_tree_i64();
         let vec_data: Vec<_> = data.to_vec();
         for (k, v) in data {
@@ -596,7 +595,7 @@ mod tests {
 
     use crate::distance::{EuclideanDistance, Point};
 
-    fn new_tree_point() -> MTree<Point, String, f64> {
+    fn new_tree_point() -> MTree<Point, String, f64, crate::stats::DescendantCounter, EuclideanDistance> {
         MTree::with_distance(EuclideanDistance)
     }
 
@@ -1372,7 +1371,7 @@ mod tests {
         }
 
         fn assert_knn(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             id: EntryId,
             key: (i64, i64),
@@ -1404,7 +1403,7 @@ mod tests {
 
         // Alle 100 Operationen nur fünf Ids, nicht der ganze Bestand.
         fn spot_check(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             rng: &mut u64,
             op: u64,
@@ -1417,7 +1416,7 @@ mod tests {
         }
 
         fn insert_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             rng: &mut u64,
             op: &mut u64,
@@ -1431,7 +1430,7 @@ mod tests {
         }
 
         fn erase_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             rng: &mut u64,
             op: &mut u64,
@@ -1574,7 +1573,7 @@ mod tests {
         }
 
         fn check_id(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             active: &HashSet<EntryId>,
             idx: usize,
@@ -1679,7 +1678,7 @@ mod tests {
         }
 
         fn spot_check(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             active: &HashSet<EntryId>,
             rng: &mut u64,
@@ -1692,7 +1691,7 @@ mod tests {
         }
 
         fn insert_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,
@@ -1710,7 +1709,7 @@ mod tests {
         }
 
         fn erase_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,

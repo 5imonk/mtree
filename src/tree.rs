@@ -2,7 +2,7 @@
 // Released under the GNU Lesser General Public License version 3,
 // see accompanying file LICENSE or <https://www.gnu.org/licenses/>.
 
-use crate::distance::{Distance, EuclideanDistance};
+use crate::distance::{Distance, DynDistance, EuclideanDistance};
 use crate::entry::{DuplicateKey, EntryId, UpdateKeyError};
 use crate::node::{NodeId, NodePtr, ObjectNode, RoutingNode};
 use crate::stats::{DescendantCounter, NodeStats};
@@ -14,12 +14,14 @@ use std::sync::Arc;
 /// M-Tree Datenstruktur für effiziente Bereichs- und Nearest-Neighbor-Suche.
 ///
 /// Routing-Knoten liegen in einer Arena (`nodes`); Blätter (`ObjectNode`) in `by_id`.
-pub struct MTree<K, V, D = f64, S = DescendantCounter>
+/// Distanz ist monomorph (`Dist`); Default [`DynDistance`] hält `MTree<K, V>` typlöschbar.
+pub struct MTree<K, V, D = f64, S = DescendantCounter, Dist = DynDistance<K, D>>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     min_node_size: usize,
     max_node_size: usize,
@@ -32,15 +34,16 @@ where
     free_list: Vec<usize>,
     key_index: HashMap<K, HashMap<u64, EntryId>>,
     entry_count: usize,
-    pub(crate) distance_fn: Box<dyn Distance<K, Output = D> + Send + Sync>,
+    pub(crate) distance_fn: Dist,
 }
 
-impl<K, V, D, S> Clone for MTree<K, V, D, S>
+impl<K, V, D, S, Dist> Clone for MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync + Hash + Eq,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V> + Clone,
+    Dist: Distance<K, Output = D> + Clone,
 {
     /// Klont die Routing-Arena und `by_id` (ObjectNodes bleiben über Arc geteilt).
     /// Parent-`NodeId`s bleiben gültig, solange die Arena 1:1 geklont wird.
@@ -55,7 +58,7 @@ where
             free_list: self.free_list.clone(),
             key_index: self.key_index.clone(),
             entry_count: self.entry_count,
-            distance_fn: self.distance_fn.clone_box(),
+            distance_fn: self.distance_fn.clone(),
         }
     }
 }
@@ -112,24 +115,32 @@ pub(crate) fn dist_value_from_f64<D: DistanceType>(x: f64) -> D {
 }
 
 /// Erweiterte Metrik `d(K,K) + |εa − εb|`.
-pub(crate) fn metric_distance<K, D: DistanceType>(
-    distance_fn: &dyn Distance<K, Output = D>,
+pub(crate) fn metric_distance<K, D, Dist>(
+    distance_fn: &Dist,
     a: &K,
     eps_a: f64,
     b: &K,
     eps_b: f64,
-) -> D {
+) -> D
+where
+    D: DistanceType,
+    Dist: Distance<K, Output = D> + ?Sized,
+{
     let base = dist_value_as_f64(distance_fn.distance(a, b));
     dist_value_from_f64(base + (eps_a - eps_b).abs())
 }
 
-pub(crate) fn metric_f64<K, D: DistanceType>(
-    distance_fn: &dyn Distance<K, Output = D>,
+pub(crate) fn metric_f64<K, D, Dist>(
+    distance_fn: &Dist,
     a: &K,
     eps_a: f64,
     b: &K,
     eps_b: f64,
-) -> f64 {
+) -> f64
+where
+    D: DistanceType,
+    Dist: Distance<K, Output = D> + ?Sized,
+{
     dist_value_as_f64(metric_distance(distance_fn, a, eps_a, b, eps_b))
 }
 
@@ -206,13 +217,14 @@ pub fn node_params_for_capacity(expected_entries: usize) -> (usize, usize, usize
     (min, max, split)
 }
 
-impl<K, V> MTree<K, V, f64>
+impl<K, V> MTree<K, V, f64, DescendantCounter, DynDistance<K, f64>>
 where
-    K: Clone + Send + Sync + Hash + Eq,
+    K: Clone + Send + Sync + Hash + Eq + 'static,
     V: Send + Sync,
 {
-    /// Erstellt einen neuen M-Tree mit benutzerdefinierter Distanzfunktion
-    pub fn with_distance<F>(distance_fn: F) -> Self
+    /// Wie [`Self::with_distance`], aber Distanz typgelöscht (`DynDistance`).
+    /// Nützlich wenn der konkrete Distanztyp in Signaturen nicht erscheinen soll.
+    pub fn with_dyn_distance<F>(distance_fn: F) -> Self
     where
         F: Distance<K, Output = f64> + Send + Sync + 'static,
     {
@@ -226,20 +238,40 @@ where
             free_list: Vec::new(),
             key_index: HashMap::new(),
             entry_count: 0,
-            distance_fn: Box::new(distance_fn),
+            distance_fn: DynDistance::new(distance_fn),
+        }
+    }
+}
+
+impl<K, V, F> MTree<K, V, f64, DescendantCounter, F>
+where
+    K: Clone + Send + Sync + Hash + Eq,
+    V: Send + Sync,
+    F: Distance<K, Output = f64>,
+{
+    /// Erstellt einen neuen M-Tree mit benutzerdefinierter Distanzfunktion (monomorph).
+    pub fn with_distance(distance_fn: F) -> Self {
+        Self {
+            min_node_size: 5,
+            max_node_size: 100,
+            split_sampling: 20,
+            nodes: Vec::new(),
+            root: None,
+            by_id: Vec::new(),
+            free_list: Vec::new(),
+            key_index: HashMap::new(),
+            entry_count: 0,
+            distance_fn,
         }
     }
 
-    /// Erstellt einen neuen M-Tree mit benutzerdefinierten Parametern
-    pub fn with_params<F>(
+    /// Erstellt einen neuen M-Tree mit benutzerdefinierten Parametern (monomorph).
+    pub fn with_params(
         min_node_size: usize,
         max_node_size: usize,
         split_sampling: usize,
         distance_fn: F,
-    ) -> Self
-    where
-        F: Distance<K, Output = f64> + Send + Sync + 'static,
-    {
+    ) -> Self {
         Self {
             min_node_size,
             max_node_size,
@@ -250,7 +282,7 @@ where
             free_list: Vec::new(),
             key_index: HashMap::new(),
             entry_count: 0,
-            distance_fn: Box::new(distance_fn),
+            distance_fn,
         }
     }
 
@@ -258,17 +290,14 @@ where
     ///
     /// `expected_entries` ist ein Hinweis auf die geplante Datenmenge; die
     /// Parameter bleiben danach fest (kein automatisches Nachskalieren).
-    pub fn with_capacity_hint<F>(expected_entries: usize, distance_fn: F) -> Self
-    where
-        F: Distance<K, Output = f64> + Send + Sync + 'static,
-    {
+    pub fn with_capacity_hint(expected_entries: usize, distance_fn: F) -> Self {
         let (min, max, split) = node_params_for_capacity(expected_entries);
         Self::with_params(min, max, split, distance_fn)
     }
 }
 
 /// Spezielle Implementierung für Vec<f32> mit euklidischer Distanz
-impl<V> MTree<Vec<f32>, V, f64>
+impl<V> MTree<Vec<f32>, V, f64, DescendantCounter, EuclideanDistance>
 where
     V: Send + Sync,
 {
@@ -283,13 +312,13 @@ where
             free_list: Vec::new(),
             key_index: HashMap::new(),
             entry_count: 0,
-            distance_fn: Box::new(EuclideanDistance),
+            distance_fn: EuclideanDistance,
         }
     }
 }
 
 /// Spezielle Implementierung für Vec<f64> mit euklidischer Distanz
-impl<V> MTree<Vec<f64>, V, f64>
+impl<V> MTree<Vec<f64>, V, f64, DescendantCounter, EuclideanDistance>
 where
     V: Send + Sync,
 {
@@ -304,17 +333,18 @@ where
             free_list: Vec::new(),
             key_index: HashMap::new(),
             entry_count: 0,
-            distance_fn: Box::new(EuclideanDistance),
+            distance_fn: EuclideanDistance,
         }
     }
 }
 
-impl<K, V, D, S> MTree<K, V, D, S>
+impl<K, V, D, S, Dist> MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
+    Dist: Distance<K, Output = D>,
 {
     /// Iteriert über alle Eintrags-IDs (O(Kapazität von `by_id`), keine Distanzberechnung).
     ///
@@ -350,12 +380,13 @@ where
     }
 }
 
-impl<K, V, D, S> MTree<K, V, D, S>
+impl<K, V, D, S, Dist> MTree<K, V, D, S, Dist>
 where
     K: Clone + Send + Sync + Hash + Eq + Default,
     V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V> + Default + Clone,
+    Dist: Distance<K, Output = D>,
 {
     fn alloc_slot(&mut self) -> EntryId {
         let index = if let Some(index) = self.free_list.pop() {
@@ -382,7 +413,7 @@ where
     }
 
     fn metric(&self, a: &K, eps_a: f64, b: &K, eps_b: f64) -> D {
-        metric_distance(self.distance_fn.as_ref(), a, eps_a, b, eps_b)
+        metric_distance(&self.distance_fn, a, eps_a, b, eps_b)
     }
 
     fn child_key(&self, child: &NodePtr<K, V, S>) -> K {
