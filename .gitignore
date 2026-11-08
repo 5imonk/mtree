@@ -22,9 +22,8 @@ target/criterion/
 .env
 .env.local
 
-# Documentation
+# Documentation (rustdoc only; tracked markdown lives in /docs/)
 /target/doc/
-/docs/
 
 # Backup files
 *.bak

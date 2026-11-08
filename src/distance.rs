@@ -39,18 +39,55 @@ pub trait AsCoordinates: Send + Sync {
     fn coordinates(&self) -> &[f64];
 }
 
-/// Trait für Distanzfunktionen
+/// Trait für Distanzfunktionen.
+///
+/// Für `MTree::Clone` muss die konkrete Distanz zusätzlich [`Clone`] implementieren.
+/// Heterogene / typgelöschte Bäume nutzen [`DynDistance`] (intern `Arc`).
 pub trait Distance<K>: Send + Sync {
     type Output;
     fn distance(&self, a: &K, b: &K) -> Self::Output;
+}
 
-    /// Erstellt eine Box-Kopie der Distanzfunktion (für Query-Iteratoren).
-    fn clone_box(&self) -> Box<dyn Distance<K, Output = Self::Output> + Send + Sync> {
-        panic!("clone_box not supported for this distance type")
+/// Typgelöschte Distanz (Default-Parameter von [`crate::tree::MTree`]).
+///
+/// Ermöglicht `MTree<K, V>` ohne konkreten Distanz-Typparameter; Calls gehen über Vtable.
+pub struct DynDistance<K, D> {
+    inner: std::sync::Arc<dyn Distance<K, Output = D> + Send + Sync>,
+}
+
+impl<K, D> DynDistance<K, D> {
+    pub fn new<F>(distance_fn: F) -> Self
+    where
+        F: Distance<K, Output = D> + Send + Sync + 'static,
+    {
+        Self {
+            inner: std::sync::Arc::new(distance_fn),
+        }
+    }
+}
+
+impl<K, D> Clone for DynDistance<K, D> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: std::sync::Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<K, D> Distance<K> for DynDistance<K, D>
+where
+    K: Send + Sync,
+    D: Send + Sync,
+{
+    type Output = D;
+
+    fn distance(&self, a: &K, b: &K) -> D {
+        self.inner.distance(a, b)
     }
 }
 
 /// Euklidische Distanzfunktion mit SIMD-Optimierungen
+#[derive(Clone, Copy, Debug, Default)]
 pub struct EuclideanDistance;
 
 impl EuclideanDistance {
@@ -161,10 +198,6 @@ impl EuclideanDistance {
 impl Distance<Vec<f32>> for EuclideanDistance {
     type Output = f64;
 
-    fn clone_box(&self) -> Box<dyn Distance<Vec<f32>, Output = f64> + Send + Sync> {
-        Box::new(EuclideanDistance)
-    }
-
     fn distance(&self, a: &Vec<f32>, b: &Vec<f32>) -> f64 {
         #[cfg(target_arch = "x86_64")]
         {
@@ -180,10 +213,6 @@ impl Distance<Vec<f32>> for EuclideanDistance {
 
 impl Distance<Vec<f64>> for EuclideanDistance {
     type Output = f64;
-
-    fn clone_box(&self) -> Box<dyn Distance<Vec<f64>, Output = f64> + Send + Sync> {
-        Box::new(EuclideanDistance)
-    }
 
     fn distance(&self, a: &Vec<f64>, b: &Vec<f64>) -> f64 {
         #[cfg(target_arch = "x86_64")]
@@ -206,10 +235,6 @@ where
 {
     type Output = f64;
 
-    fn clone_box(&self) -> Box<dyn Distance<P, Output = f64> + Send + Sync> {
-        Box::new(EuclideanDistance)
-    }
-
     fn distance(&self, a: &P, b: &P) -> f64 {
         Self::distance_slice(a.coordinates(), b.coordinates())
     }
@@ -228,6 +253,18 @@ where
     pub fn new(distance_fn: F) -> Self {
         Self {
             distance_fn,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, K, D> Clone for GenericDistance<F, K, D>
+where
+    F: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            distance_fn: self.distance_fn.clone(),
             _phantom: std::marker::PhantomData,
         }
     }

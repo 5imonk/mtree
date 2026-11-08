@@ -7,7 +7,7 @@ mod tests {
     use crate::{KnnConfig, RangeSearchConfig, SearchConfig};
     use std::collections::BTreeSet;
 
-    /// Euklidische Distanz für (i64, i64) – implementiert clone_box für search/range_search
+    /// Euklidische Distanz für (i64, i64)
     #[derive(Clone)]
     struct Euclid2d;
     impl Distance<(i64, i64)> for Euclid2d {
@@ -17,12 +17,11 @@ mod tests {
             let dy = (a.1 - b.1) as f64;
             (dx * dx + dy * dy).sqrt()
         }
-        fn clone_box(&self) -> Box<dyn Distance<(i64, i64), Output = f64> + Send + Sync> {
-            Box::new(Euclid2d)
-        }
     }
 
-    fn new_tree_i64() -> MTree<(i64, i64), String> {
+    type TreeI64 = MTree<(i64, i64), String, f64, crate::stats::DescendantCounter, Euclid2d>;
+
+    fn new_tree_i64() -> TreeI64 {
         MTree::with_params(5, 100, 20, Euclid2d)
     }
 
@@ -73,16 +72,56 @@ mod tests {
         with_dist.into_iter().take(k).collect()
     }
 
+    /// Exact-kNN mit Toleranz für Gleichstände an der k-Grenze: Distanzfolgen müssen
+    /// übereinstimmen; Keys mit strikt kleinerer Distanz als k-te müssen identisch sein.
+    fn assert_knn_matches_naive_allowing_ties(
+        got: &[((i64, i64), f64)],
+        expected: &[((i64, i64), f64)],
+    ) {
+        assert_eq!(got.len(), expected.len());
+        let mut got_sorted = got.to_vec();
+        let mut exp_sorted = expected.to_vec();
+        got_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        exp_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, (g, e)) in got_sorted.iter().zip(exp_sorted.iter()).enumerate() {
+            assert!(
+                (g.1 - e.1).abs() < 1e-9,
+                "dist mismatch at i={i}: got {} vs {}",
+                g.1,
+                e.1
+            );
+        }
+        if expected.is_empty() {
+            return;
+        }
+        let kth = exp_sorted.last().unwrap().1;
+        let got_nearer: BTreeSet<_> = got_sorted
+            .iter()
+            .filter(|(_, d)| *d < kth - 1e-12)
+            .map(|(k, _)| *k)
+            .collect();
+        let exp_nearer: BTreeSet<_> = exp_sorted
+            .iter()
+            .filter(|(_, d)| *d < kth - 1e-12)
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(
+            got_nearer, exp_nearer,
+            "strictly nearer key sets differ"
+        );
+    }
+
     #[test]
     fn test_node_params_for_capacity() {
         assert_eq!(node_params_for_capacity(0), node_params_for_capacity(1));
         let (_min, max_100, _split) = node_params_for_capacity(100);
-        assert_eq!(max_100, 10);
+        // √100 = 10 → floor clamp 16
+        assert_eq!(max_100, 16);
         let (min, max, split) = node_params_for_capacity(100);
         assert_eq!(min, (max / 4).max(2));
         assert_eq!(split, (max / 4).clamp(5, 20));
         let (_, max_big, _) = node_params_for_capacity(1_000_000);
-        assert_eq!(max_big, 100);
+        assert_eq!(max_big, 64);
     }
 
     #[test]
@@ -106,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_empty_tree() {
-        let tree: MTree<(i64, i64), String> = MTree::with_params(5, 100, 20, Euclid2d);
+        let tree: TreeI64 = MTree::with_params(5, 100, 20, Euclid2d);
         assert!(tree.is_empty());
         assert_eq!(tree.size(), 0);
     }
@@ -220,7 +259,7 @@ mod tests {
         }
 
         for id in &ids {
-            let key = small.get(*id).unwrap().key();
+            let key = small.get(*id).unwrap().key().clone();
             for k in [1usize, 3, 5, 10] {
                 let with_self = small.knn_from_entry(*id, k, true, ()).unwrap();
                 assert!(!with_self.is_empty());
@@ -245,11 +284,16 @@ mod tests {
                     .filter(|(nk, _, _)| *nk != key)
                     .take(k)
                     .collect();
-                assert_eq!(without_wide.len(), expected.len());
-                for (a, b) in without_wide.iter().zip(expected.iter()) {
-                    assert_eq!(wide.key(a.0).unwrap(), b.0);
-                    assert!((a.1 - b.2).abs() < 1e-9);
-                }
+                assert_knn_matches_naive_allowing_ties(
+                    &without_wide
+                        .iter()
+                        .map(|(id, d)| (wide.key(*id).unwrap(), *d))
+                        .collect::<Vec<_>>(),
+                    &expected
+                        .iter()
+                        .map(|(nk, _, d)| (*nk, *d))
+                        .collect::<Vec<_>>(),
+                );
             }
         }
     }
@@ -408,7 +452,7 @@ mod tests {
 
     fn build_tree_and_vec(
         data: &[((i64, i64), String)],
-    ) -> (MTree<(i64, i64), String>, Vec<((i64, i64), String)>) {
+    ) -> (TreeI64, Vec<((i64, i64), String)>) {
         let mut tree = new_tree_i64();
         let vec_data: Vec<_> = data.to_vec();
         for (k, v) in data {
@@ -477,34 +521,15 @@ mod tests {
             for k in k_values {
                 let mtree_results = tree.knn_search(&needle, k, ());
                 let naive_results = naive_knn_search(&vec_data, &needle, k);
-                assert_eq!(
-                    mtree_results.len(),
-                    naive_results.len(),
-                    "needle={:?} k={}",
-                    needle,
-                    k
-                );
-                for (i, ((node, dist), (key, _, naive_dist))) in
-                    mtree_results.iter().zip(naive_results.iter()).enumerate()
-                {
-                    assert_eq!(
-                        tree.key(*node).unwrap(),
-                        *key,
-                        "needle={:?} k={} i={}",
-                        needle,
-                        k,
-                        i
-                    );
-                    assert!(
-                        (dist - naive_dist).abs() < 1e-9,
-                        "needle={:?} k={} i={} dists {:?} vs {:?}",
-                        needle,
-                        k,
-                        i,
-                        dist,
-                        naive_dist
-                    );
-                }
+                let got: Vec<_> = mtree_results
+                    .iter()
+                    .map(|(id, d)| (tree.key(*id).unwrap(), *d))
+                    .collect();
+                let expected: Vec<_> = naive_results
+                    .iter()
+                    .map(|(nk, _, d)| (*nk, *d))
+                    .collect();
+                assert_knn_matches_naive_allowing_ties(&got, &expected);
             }
         }
     }
@@ -571,7 +596,7 @@ mod tests {
 
     use crate::distance::{EuclideanDistance, Point};
 
-    fn new_tree_point() -> MTree<Point, String, f64> {
+    fn new_tree_point() -> MTree<Point, String, f64, crate::stats::DescendantCounter, EuclideanDistance> {
         MTree::with_distance(EuclideanDistance)
     }
 
@@ -647,7 +672,7 @@ mod tests {
         let id = tree.insert((1, 2), "a".to_string()).unwrap();
         let node = tree.get(id).unwrap();
         assert_eq!(node.id, id);
-        assert_eq!(node.key(), (1, 2));
+        assert_eq!(*node.key(), (1, 2));
         assert_eq!(node.payload(), "a");
     }
 
@@ -1347,7 +1372,7 @@ mod tests {
         }
 
         fn assert_knn(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             id: EntryId,
             key: (i64, i64),
@@ -1379,7 +1404,7 @@ mod tests {
 
         // Alle 100 Operationen nur fünf Ids, nicht der ganze Bestand.
         fn spot_check(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             rng: &mut u64,
             op: u64,
@@ -1392,7 +1417,7 @@ mod tests {
         }
 
         fn insert_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             rng: &mut u64,
             op: &mut u64,
@@ -1406,7 +1431,7 @@ mod tests {
         }
 
         fn erase_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             rng: &mut u64,
             op: &mut u64,
@@ -1549,7 +1574,7 @@ mod tests {
         }
 
         fn check_id(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             active: &HashSet<EntryId>,
             idx: usize,
@@ -1654,7 +1679,7 @@ mod tests {
         }
 
         fn spot_check(
-            tree: &MTree<(i64, i64), String>,
+            tree: &TreeI64,
             live: &[(EntryId, (i64, i64))],
             active: &HashSet<EntryId>,
             rng: &mut u64,
@@ -1667,7 +1692,7 @@ mod tests {
         }
 
         fn insert_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,
@@ -1685,7 +1710,7 @@ mod tests {
         }
 
         fn erase_one(
-            tree: &mut MTree<(i64, i64), String>,
+            tree: &mut TreeI64,
             live: &mut Vec<(EntryId, (i64, i64))>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,

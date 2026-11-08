@@ -8,6 +8,7 @@ pub mod filtered;
 pub(crate) mod node;
 pub mod query;
 pub(crate) mod placeholder_queue;
+mod scratch;
 mod search;
 pub mod search_config;
 pub mod stats;
@@ -22,10 +23,14 @@ mod tests;
 pub use entry::{DuplicateKey, EntryId, UpdateKeyError};
 pub use filtered::{FilteredQuery, FilteredRangeQuery};
 pub use search_config::{KnnConfig, RangeSearchConfig, SearchConfig};
-pub use tree::{node_params_for_capacity, MTree};
+pub use tree::{
+    node_params_for_capacity, MTree, DEFAULT_MAX_NODE_SIZE, DEFAULT_MIN_NODE_SIZE,
+    DEFAULT_SPLIT_SAMPLING,
+};
 pub use query::{Query, RangeQuery};
+pub use scratch::QueryScratch;
 pub use stats::NodeStats;
-pub use distance::{AsCoordinates, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
+pub use distance::{AsCoordinates, DynDistance, EuclideanDistance, Point, epsilon_from, epsilon_from_hash, identity_hash, EPSILON_MAX};
 
 /// Crate-Version aus `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

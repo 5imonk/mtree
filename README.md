@@ -1,14 +1,17 @@
 # M-Tree Rust Implementation
 
-Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-Optimierungen und paralleler Verarbeitung.
+Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-Optimierungen.
 
 ## Features
 
 - **SIMD-optimierte Distanzberechnungen**: Nutzt portable-simd für vektorisierte euklidische Distanzen
-- **Parallele Suche**: Rayon-Integration für parallele Traversierung
-- **Thread-sicher**: Arc<Mutex<>> für sichere parallele Operationen
+- **Ownership-Modell**: Mutation nur unter `&mut MTree`; Queries unter `&self` ohne per-node Locks (Arena + `NodeId`)
+- **Parallelität**: Viele parallele Reader (`&MTree`) sind erlaubt und gewollt (z. B. Rayon). Writer nur exklusiv (`&mut MTree`); kein concurrent Mutate desselben Baums — sonst externe Sync oder eigene Bäume/Shards
 - **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
+
+Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).  
+Fortsetzung (sdo-sicher, nach Phase 1–4): [`docs/PERF_NEXT_SDO_SAFE.md`](docs/PERF_NEXT_SDO_SAFE.md).
 
 ## Begriffe
 
@@ -33,13 +36,10 @@ impl mtree::distance::Distance<(i64, i64)> for Euclid2d {
         let dy = (a.1 - b.1) as f64;
         (dx * dx + dy * dy).sqrt()
     }
-    fn clone_box(&self) -> Box<dyn mtree::distance::Distance<(i64, i64), Output = f64> + Send + Sync> {
-        Box::new(Euclid2d)
-    }
 }
 
 let mut tree = MTree::with_distance(Euclid2d);
-// Oder mit Größenhinweis (wählt min/max/split per √n-Heuristik):
+// Oder mit Größenhinweis (wählt min/max/split per √n-Heuristik, Clamp 16…64):
 // let mut tree = MTree::with_capacity_hint(10_000, Euclid2d);
 let id = tree.insert((1, 2), "Raum A".to_string()).unwrap();
 let _ = tree.insert((3, 4), "Raum B".to_string()).unwrap();
@@ -164,7 +164,7 @@ Für Float-Vektoren als Key: `mtree::distance::Point` verwenden (`Hash` + `Eq` a
 
 ## Version
 
-`1.0.0`, auch als `mtree::VERSION`. Ab `1.0` sind Brüche an dieser API `2.0`, kompatible Fixes `1.0.z`. Das Changelog steht in `CHANGELOG.md`.
+`2.0.0`, auch als `mtree::VERSION`. Ab `2.0` sind Brüche an dieser API `3.0`, kompatible Erweiterungen `2.x`, Fixes `2.0.z`. Das Changelog steht in `CHANGELOG.md`.
 
 ## Lizenz
 
