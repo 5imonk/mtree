@@ -8,25 +8,27 @@ use crate::stats::NodeStats;
 use crate::tree::DistanceType;
 
 /// Bereichssuche (Annulus), die nur aktive Einträge liefert.
-pub struct FilteredQuery<K, V, D, S, F>
+pub struct FilteredQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    inner: Query<K, V, D, S>,
+    inner: Query<'a, K, V, D, S>,
     is_active: F,
 }
 
-impl<K, V, D, S, F> FilteredQuery<K, V, D, S, F>
+impl<'a, K, V, D, S, F> FilteredQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    pub fn new(inner: Query<K, V, D, S>, is_active: F) -> Self {
+    pub fn new(inner: Query<'a, K, V, D, S>, is_active: F) -> Self {
         Self { inner, is_active }
     }
 
@@ -35,9 +37,10 @@ where
     }
 }
 
-impl<K, V, D, S, F> Iterator for FilteredQuery<K, V, D, S, F>
+impl<'a, K, V, D, S, F> Iterator for FilteredQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
@@ -59,25 +62,27 @@ where
 }
 
 /// Radius-Suche, die nur aktive Einträge liefert.
-pub struct FilteredRangeQuery<K, V, D, S, F>
+pub struct FilteredRangeQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    inner: RangeQuery<K, V, D, S>,
+    inner: RangeQuery<'a, K, V, D, S>,
     is_active: F,
 }
 
-impl<K, V, D, S, F> FilteredRangeQuery<K, V, D, S, F>
+impl<'a, K, V, D, S, F> FilteredRangeQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,
 {
-    pub fn new(inner: RangeQuery<K, V, D, S>, is_active: F) -> Self {
+    pub fn new(inner: RangeQuery<'a, K, V, D, S>, is_active: F) -> Self {
         Self { inner, is_active }
     }
 
@@ -86,9 +91,10 @@ where
     }
 }
 
-impl<K, V, D, S, F> Iterator for FilteredRangeQuery<K, V, D, S, F>
+impl<'a, K, V, D, S, F> Iterator for FilteredRangeQuery<'a, K, V, D, S, F>
 where
     K: Clone + Send + Sync,
+    V: Send + Sync,
     D: DistanceType,
     S: NodeStats<K, V>,
     F: Fn(EntryId, &V) -> bool,

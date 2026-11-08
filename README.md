@@ -1,12 +1,12 @@
 # M-Tree Rust Implementation
 
-Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-Optimierungen und paralleler Verarbeitung.
+Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-Optimierungen.
 
 ## Features
 
 - **SIMD-optimierte Distanzberechnungen**: Nutzt portable-simd für vektorisierte euklidische Distanzen
-- **Parallele Suche**: Rayon-Integration für parallele Traversierung
-- **Thread-sicher**: Arc<Mutex<>> für sichere parallele Operationen
+- **Ownership-Modell**: Ein Owner pro Baum — Mutation unter `&mut MTree`, Query unter `&self` ohne per-node Locks (Arena + `NodeId`)
+- **Parallelität**: Externe Sync oder eigene Bäume/Shards; kein shared concurrent Mutate desselben Baums
 - **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 

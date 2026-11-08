@@ -7,7 +7,7 @@
 use crate::distance::Distance;
 use crate::entry::EntryId;
 use crate::filtered::query::{FilteredQuery, FilteredRangeQuery};
-use crate::node::{NodePtr, ObjectNode, RoutingNode};
+use crate::node::{NodeId, NodePtr, ObjectNode, RoutingNode};
 use crate::query::{Query, RangeQuery};
 use crate::search_config::{
     IntoKnnConfig, IntoRangeSearchConfig, IntoSearchConfig, KnnConfigResolved,
@@ -21,7 +21,7 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn entry_hits<K, V, D, S>(hits: Vec<(Arc<ObjectNode<K, V, S>>, D)>) -> Vec<(EntryId, D)>
 where
@@ -39,19 +39,13 @@ pub(crate) enum KnnSeedMode {
 }
 
 /// Seed-Kontext: Leaf zuerst besuchen (FromEntry oder Hint).
-pub(crate) struct KnnSeedCtx<K, V, S>
-where
-    S: NodeStats<K, V>,
-{
+pub(crate) struct KnnSeedCtx {
     pub id: EntryId,
-    pub leaf: Option<Arc<Mutex<RoutingNode<K, V, S>>>>,
+    pub leaf: Option<NodeId>,
     pub mode: KnnSeedMode,
 }
 
-impl<K, V, S> KnnSeedCtx<K, V, S>
-where
-    S: NodeStats<K, V>,
-{
+impl KnnSeedCtx {
     pub(crate) fn exclude_self(&self) -> bool {
         matches!(self.mode, KnnSeedMode::FromEntry { include_self: false })
     }
@@ -62,16 +56,8 @@ where
     }
 }
 
-pub(crate) fn is_seeded_leaf<K, V, S>(
-    from: Option<&KnnSeedCtx<K, V, S>>,
-    node: &Arc<Mutex<RoutingNode<K, V, S>>>,
-) -> bool
-where
-    S: NodeStats<K, V>,
-{
-    from.and_then(|f| f.leaf.as_ref())
-        .map(|leaf| Arc::ptr_eq(leaf, node))
-        .unwrap_or(false)
+pub(crate) fn is_seeded_leaf(from: Option<&KnnSeedCtx>, node: NodeId) -> bool {
+    from.and_then(|f| f.leaf).map(|leaf| leaf == node).unwrap_or(false)
 }
 
 /// Seed-Leaf zuerst bewerten: FromEntry mit Distanz 0, Hint mit echter Distanz.
@@ -79,7 +65,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
     leaf: &RoutingNode<K, V, S>,
     needle: &K,
     needle_eps: f64,
-    from: &KnnSeedCtx<K, V, S>,
+    from: &KnnSeedCtx,
     distance_fn: &dyn Distance<K, Output = D>,
     pruning_radius: &Cell<f64>,
     mut on_object: impl FnMut(Arc<ObjectNode<K, V, S>>, f64),
@@ -121,7 +107,7 @@ pub(crate) fn visit_seeded_leaf_objects<K, V, D, S>(
 
 fn retain_exclude_self<K, V, S, D>(
     results: &mut Vec<(Arc<ObjectNode<K, V, S>>, D)>,
-    from: Option<&KnnSeedCtx<K, V, S>>,
+    from: Option<&KnnSeedCtx>,
 ) where
     S: NodeStats<K, V>,
 {
@@ -239,15 +225,15 @@ where
         needle_eps: f64,
         min_radius: D,
         max_radius: D,
-    ) -> Query<K, V, D, S> {
-        if let Some(ref root) = self.root {
+    ) -> Query<'_, K, V, D, S> {
+        if let Some(root) = self.root {
             Query::new(
+                self,
                 needle.clone(),
                 needle_eps,
                 min_radius,
                 max_radius,
-                root.clone(),
-                self.distance_fn.clone_box(),
+                root,
             )
         } else {
             Query::empty()
@@ -260,15 +246,9 @@ where
         needle: &K,
         needle_eps: f64,
         radius: D,
-    ) -> RangeQuery<K, V, D, S> {
-        if let Some(ref root) = self.root {
-            RangeQuery::new(
-                needle.clone(),
-                needle_eps,
-                radius,
-                root.clone(),
-                self.distance_fn.clone_box(),
-            )
+    ) -> RangeQuery<'_, K, V, D, S> {
+        if let Some(root) = self.root {
+            RangeQuery::new(self, needle.clone(), needle_eps, radius, root)
         } else {
             RangeQuery::empty()
         }
@@ -279,7 +259,7 @@ where
         &'a self,
         needle: &K,
         config: impl IntoSearchConfig<'a, D, V>,
-    ) -> FilteredQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+    ) -> FilteredQuery<'a, K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_search_config();
         let inner = self.query_annulus(needle, cfg.epsilon, cfg.min_radius, cfg.max_radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
@@ -292,7 +272,7 @@ where
         &'a self,
         needle: &K,
         config: impl IntoRangeSearchConfig<'a, D, V>,
-    ) -> FilteredRangeQuery<K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
+    ) -> FilteredRangeQuery<'a, K, V, D, S, Box<dyn Fn(EntryId, &V) -> bool + 'a>> {
         let cfg = config.into_range_search_config();
         let inner = self.query_ball(needle, cfg.epsilon, cfg.radius);
         let pred: Box<dyn Fn(EntryId, &V) -> bool + 'a> =
@@ -361,7 +341,7 @@ where
         needle_eps: f64,
         k: usize,
         cfg: KnnConfigResolved<'_, D, V>,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let has_annulus = cfg.min_radius.is_some() || cfg.max_radius.is_some();
         let min_r = cfg.min_radius.unwrap_or_else(D::zero);
@@ -397,7 +377,7 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -420,10 +400,10 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
-        let root = self.root.as_ref().unwrap().clone();
-        let distance_fn = self.distance_fn.clone_box();
+        let root = self.root.unwrap();
+        let distance_fn = self.distance_fn.as_ref();
 
         // Nur bestätigte Objektdistanzen. Teilbaum-Oberschranken zählen nicht als Nachbar,
         // sonst fällt der Pruning-Radius unter die echte k-te Distanz.
@@ -439,19 +419,19 @@ where
         };
 
         if let Some(ctx) = from {
-            if let Some(leaf) = &ctx.leaf {
+            if let Some(leaf_id) = ctx.leaf {
                 #[cfg(feature = "knn_stats")]
                 {
                     crate::knn_stats::record_routing_visit();
                     crate::knn_stats::record_leaf_visit();
                 }
-                let leaf_guard = leaf.lock().unwrap();
+                let leaf = &self.nodes[leaf_id.index()];
                 visit_seeded_leaf_objects(
-                    &leaf_guard,
+                    leaf,
                     needle,
                     needle_eps,
                     ctx,
-                    distance_fn.as_ref(),
+                    distance_fn,
                     &prune_cell,
                     |obj, dist| {
                         let pruning_radius = confirmed_kth(&best);
@@ -461,27 +441,25 @@ where
                         }
                     },
                 );
-                drop(leaf_guard);
-                if Arc::ptr_eq(leaf, &root) {
+                if leaf_id == root {
                     return finish_knn_hits(hits);
                 }
             }
         }
 
-        let (root_distance, root_lb, root_ub) = {
-            let root_guard = root.lock().unwrap();
-            let d = metric_f64(
-                distance_fn.as_ref(),
-                &root_guard.key,
-                root_guard.epsilon,
-                needle,
-                needle_eps,
-            );
-            let r = root_guard.covering_radius;
-            (d, (d - r).max(0.0), d + r)
-        };
+        let root_node = &self.nodes[root.index()];
+        let root_distance = metric_f64(
+            distance_fn,
+            &root_node.key,
+            root_node.epsilon,
+            needle,
+            needle_eps,
+        );
+        let r = root_node.covering_radius;
+        let root_lb = (root_distance - r).max(0.0);
+        let root_ub = root_distance + r;
 
-        let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
+        let mut pq: BinaryHeap<KnnQueueEntry> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
@@ -502,18 +480,18 @@ where
                 break;
             }
 
-            if is_seeded_leaf(from, &entry.node) {
+            if is_seeded_leaf(from, entry.node) {
                 continue;
             }
 
             #[cfg(feature = "knn_stats")]
             crate::knn_stats::record_routing_visit();
 
-            let node_guard = entry.node.lock().unwrap();
-            if node_guard.is_leaf {
+            let node = &self.nodes[entry.node.index()];
+            if node.is_leaf {
                 #[cfg(feature = "knn_stats")]
                 crate::knn_stats::record_leaf_visit();
-                for child in &node_guard.children {
+                for child in &node.children {
                     if let NodePtr::Object(ref obj_node) = child {
                         if let Some(ctx) = from {
                             if ctx.exclude_self() && obj_node.id == ctx.id {
@@ -525,7 +503,7 @@ where
                             0.0
                         } else {
                             metric_f64(
-                                distance_fn.as_ref(),
+                                distance_fn,
                                 obj_node.key(),
                                 obj_node.epsilon(),
                                 needle,
@@ -540,40 +518,44 @@ where
                 continue;
             }
 
-            for child in &node_guard.children {
-                if let NodePtr::Routing(ref routing_child) = child {
-                    let child_guard = routing_child.lock().unwrap();
-                    let covering_radius = child_guard.covering_radius;
-                    let tri_lb = triangle_lower_bound(
-                        entry.center_distance,
-                        child_guard.parent_distance,
-                        covering_radius,
-                    );
-                    if tri_lb > pruning_radius_relaxed {
-                        continue;
-                    }
+            let routing_ids: Vec<NodeId> = node
+                .children
+                .iter()
+                .filter_map(|child| child.as_routing_id())
+                .collect();
 
-                    let center_dist = metric_f64(
-                        distance_fn.as_ref(),
-                        &child_guard.key,
-                        child_guard.epsilon,
-                        needle,
-                        needle_eps,
-                    );
-                    let lower_bound = (center_dist - covering_radius).max(0.0);
-                    let upper_bound = center_dist + covering_radius;
-
-                    if lower_bound > pruning_radius_relaxed {
-                        continue;
-                    }
-
-                    pq.push(KnnQueueEntry {
-                        node: routing_child.clone(),
-                        center_distance: center_dist,
-                        distance_bound: lower_bound,
-                        upper_bound,
-                    });
+            for child_id in routing_ids {
+                let child_node = &self.nodes[child_id.index()];
+                let covering_radius = child_node.covering_radius;
+                let tri_lb = triangle_lower_bound(
+                    entry.center_distance,
+                    child_node.parent_distance,
+                    covering_radius,
+                );
+                if tri_lb > pruning_radius_relaxed {
+                    continue;
                 }
+
+                let center_dist = metric_f64(
+                    distance_fn,
+                    &child_node.key,
+                    child_node.epsilon,
+                    needle,
+                    needle_eps,
+                );
+                let lower_bound = (center_dist - covering_radius).max(0.0);
+                let upper_bound = center_dist + covering_radius;
+
+                if lower_bound > pruning_radius_relaxed {
+                    continue;
+                }
+
+                pq.push(KnnQueueEntry {
+                    node: child_id,
+                    center_distance: center_dist,
+                    distance_bound: lower_bound,
+                    upper_bound,
+                });
             }
         }
 
@@ -586,7 +568,7 @@ where
         needle: &K,
         needle_eps: f64,
         k: usize,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let max_radius = D::infinity();
         let mut query = self.query_ball(needle, needle_eps, max_radius);
@@ -611,7 +593,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         if k == 0 || self.root.is_none() {
             return Vec::new();
@@ -636,7 +618,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, f64)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
@@ -644,22 +626,22 @@ where
             return Vec::new();
         }
 
-        let root = self.root.as_ref().unwrap().clone();
-        let distance_fn = self.distance_fn.clone_box();
+        let root = self.root.unwrap();
+        let distance_fn = self.distance_fn.as_ref();
 
         let mut best: BinaryHeap<KnnDistanceKey> = BinaryHeap::new();
         let mut hits: BinaryHeap<KnnHitEntry<K, V, S>> = BinaryHeap::new();
         let prune_cell = Cell::new(f64::INFINITY);
 
         if let Some(ctx) = from {
-            if let Some(leaf) = &ctx.leaf {
-                let leaf_guard = leaf.lock().unwrap();
+            if let Some(leaf_id) = ctx.leaf {
+                let leaf = &self.nodes[leaf_id.index()];
                 visit_seeded_leaf_objects(
-                    &leaf_guard,
+                    leaf,
                     needle,
                     needle_eps,
                     ctx,
-                    distance_fn.as_ref(),
+                    distance_fn,
                     &prune_cell,
                     |obj, dist| {
                         if dist <= min_r || dist > max_r {
@@ -688,27 +670,25 @@ where
                         prune_cell.set(kth.min(max_r));
                     },
                 );
-                drop(leaf_guard);
-                if Arc::ptr_eq(leaf, &root) {
+                if leaf_id == root {
                     return finish_knn_hits(hits);
                 }
             }
         }
 
-        let (root_distance, root_lb, root_ub) = {
-            let root_guard = root.lock().unwrap();
-            let d = metric_f64(
-                distance_fn.as_ref(),
-                &root_guard.key,
-                root_guard.epsilon,
-                needle,
-                needle_eps,
-            );
-            let r = root_guard.covering_radius;
-            (d, (d - r).max(0.0), d + r)
-        };
+        let root_node = &self.nodes[root.index()];
+        let root_distance = metric_f64(
+            distance_fn,
+            &root_node.key,
+            root_node.epsilon,
+            needle,
+            needle_eps,
+        );
+        let r = root_node.covering_radius;
+        let root_lb = (root_distance - r).max(0.0);
+        let root_ub = root_distance + r;
 
-        let mut pq: BinaryHeap<KnnQueueEntry<K, V, S>> = BinaryHeap::new();
+        let mut pq: BinaryHeap<KnnQueueEntry> = BinaryHeap::new();
         pq.push(KnnQueueEntry {
             node: root,
             center_distance: root_distance,
@@ -738,13 +718,13 @@ where
                 break;
             }
 
-            if is_seeded_leaf(from, &entry.node) {
+            if is_seeded_leaf(from, entry.node) {
                 continue;
             }
 
-            let node_guard = entry.node.lock().unwrap();
-            if node_guard.is_leaf {
-                for child in &node_guard.children {
+            let node = &self.nodes[entry.node.index()];
+            if node.is_leaf {
+                for child in &node.children {
                     if let NodePtr::Object(ref obj_node) = child {
                         if let Some(ctx) = from {
                             if ctx.exclude_self() && obj_node.id == ctx.id {
@@ -756,7 +736,7 @@ where
                             0.0
                         } else {
                             metric_f64(
-                                distance_fn.as_ref(),
+                                distance_fn,
                                 obj_node.key(),
                                 obj_node.epsilon(),
                                 needle,
@@ -776,43 +756,47 @@ where
                 continue;
             }
 
-            for child in &node_guard.children {
-                if let NodePtr::Routing(ref routing_child) = child {
-                    let child_guard = routing_child.lock().unwrap();
-                    let covering_radius = child_guard.covering_radius;
-                    let tri_lb = triangle_lower_bound(
-                        entry.center_distance,
-                        child_guard.parent_distance,
-                        covering_radius,
-                    );
-                    if tri_lb > effective_max_relaxed {
-                        continue;
-                    }
+            let routing_ids: Vec<NodeId> = node
+                .children
+                .iter()
+                .filter_map(|child| child.as_routing_id())
+                .collect();
 
-                    let center_dist = metric_f64(
-                        distance_fn.as_ref(),
-                        &child_guard.key,
-                        child_guard.epsilon,
-                        needle,
-                        needle_eps,
-                    );
-                    let lower_bound = (center_dist - covering_radius).max(0.0);
-                    let upper_bound = center_dist + covering_radius;
-
-                    if lower_bound > effective_max_relaxed {
-                        continue;
-                    }
-                    if upper_bound < min_prune {
-                        continue;
-                    }
-
-                    pq.push(KnnQueueEntry {
-                        node: routing_child.clone(),
-                        center_distance: center_dist,
-                        distance_bound: lower_bound,
-                        upper_bound,
-                    });
+            for child_id in routing_ids {
+                let child_node = &self.nodes[child_id.index()];
+                let covering_radius = child_node.covering_radius;
+                let tri_lb = triangle_lower_bound(
+                    entry.center_distance,
+                    child_node.parent_distance,
+                    covering_radius,
+                );
+                if tri_lb > effective_max_relaxed {
+                    continue;
                 }
+
+                let center_dist = metric_f64(
+                    distance_fn,
+                    &child_node.key,
+                    child_node.epsilon,
+                    needle,
+                    needle_eps,
+                );
+                let lower_bound = (center_dist - covering_radius).max(0.0);
+                let upper_bound = center_dist + covering_radius;
+
+                if lower_bound > effective_max_relaxed {
+                    continue;
+                }
+                if upper_bound < min_prune {
+                    continue;
+                }
+
+                pq.push(KnnQueueEntry {
+                    node: child_id,
+                    center_distance: center_dist,
+                    distance_bound: lower_bound,
+                    upper_bound,
+                });
             }
         }
 
@@ -826,7 +810,7 @@ where
         k: usize,
         min_radius: D,
         max_radius: D,
-        from: Option<&KnnSeedCtx<K, V, S>>,
+        from: Option<&KnnSeedCtx>,
     ) -> Vec<(Arc<ObjectNode<K, V, S>>, D)> {
         let min_r = dist_as_f64(min_radius);
         let max_r = dist_as_f64(max_radius);
