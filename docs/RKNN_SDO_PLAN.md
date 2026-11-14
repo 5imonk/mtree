@@ -1,6 +1,6 @@
 # Plan: RkNN / Nachbarschaftspflege für SDO
 
-Umsetzungsplan (noch **nicht** implementiert). Stand: 2026-11-09.
+Umsetzungsplan. Stand: 2026-11-14 — **A1–A5 in mtree 2.1.0** (opt-in Graph); Layer B/C (sdo) offen.
 
 **Scope dieses Docs:** Roadmap + Design für `mtree` und Consumer `../sdo` (`sdostream` / Cutoffs / Batch-Requery).  
 **Verwandte Ideensammlung (kein Auftrag):** `../sdo-benches/RKNN_INCREMENTAL_IDEAS.md`, Algo-Übersicht `RKNN_ALGORITHMS.md`, Achtert-Fit `RKNN_ACHTERT_FIT.md`.  

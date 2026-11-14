@@ -13,7 +13,7 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 
 Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).  
 Fortsetzung (sdo-sicher, nach Phase 1–4): [`docs/PERF_NEXT_SDO_SAFE.md`](docs/PERF_NEXT_SDO_SAFE.md).  
-RkNN / selektive Nachbarschaftspflege für SDO (Plan, noch nicht umgesetzt): [`docs/RKNN_SDO_PLAN.md`](docs/RKNN_SDO_PLAN.md).
+RkNN / kNN-Graph in mtree (A1–A5 opt-in): [`docs/RKNN_SDO_PLAN.md`](docs/RKNN_SDO_PLAN.md). SDO Cutoff/Batch (Layer B/C) noch offen.
 
 ## Begriffe
 

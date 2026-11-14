@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.1.0]
+
+Opt-in kNN-Graph / RkNN (Side-State A1–A5). Default-Bäume ohne Graph unverändert.
+
+### Added
+
+- Opt-in materialisierter kNN-Graph: `MTree::with_knn_graph`, `with_capacity_hint_knn_graph`, `insert_with_knn_hits`.
+- Reverse-kNN: `rknn_search` / `rknn_search_eps` / `rknn_from_entry` mit `max_knn_distance`-Pruning.
+- Insert-/Erase-Maintenance (Forward + Reverse); `update_key` über erase+reinsert.
+- `RoutingNode::max_knn_distance`; Graph-APIs `knn_graph_enabled` / `knn_graph_k_max` / `knn_graph_neighbors`.
+- Plan/Stand: `docs/RKNN_SDO_PLAN.md`; Stress-Tests inkl. Identity-ε-Metrik `d+|εa−εb|`.
+
 ## [2.0.0]
 
 Breaking Release: Ownership-Arena, monomorphe Distanz und Query-Hotpath.
