@@ -5,9 +5,11 @@
 pub mod distance;
 pub mod entry;
 pub mod filtered;
+pub(crate) mod knn_graph;
 pub(crate) mod node;
 pub mod query;
 pub(crate) mod placeholder_queue;
+mod rknn;
 mod scratch;
 mod search;
 pub mod search_config;

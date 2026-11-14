@@ -5,7 +5,7 @@ mod tests {
     use crate::DuplicateKey;
     use crate::MTree;
     use crate::{KnnConfig, RangeSearchConfig, SearchConfig};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     /// Euklidische Distanz für (i64, i64)
     #[derive(Clone)]
@@ -23,6 +23,11 @@ mod tests {
 
     fn new_tree_i64() -> TreeI64 {
         MTree::with_params(5, 100, 20, Euclid2d)
+    }
+
+    /// Erweiterte Metrik wie im Baum: `d(K,K) + |εa − εb|`.
+    fn metric_d(a: &(i64, i64), eps_a: f64, b: &(i64, i64), eps_b: f64) -> f64 {
+        Euclid2d.distance(a, b) + (eps_a - eps_b).abs()
     }
 
     // ---- Naive Referenz-Implementierungen (gleiche Distanz wie MTree) ----
@@ -1177,24 +1182,29 @@ mod tests {
                 .unwrap();
         }
 
-        let dist = Euclid2d;
         let ids: Vec<_> = tree.iter().collect();
         let entries: Vec<_> = ids
             .iter()
-            .map(|id| (tree.key(*id).unwrap(), *id))
+            .map(|id| {
+                (
+                    tree.key(*id).unwrap(),
+                    *id,
+                    tree.epsilon(*id).unwrap(),
+                )
+            })
             .collect();
-        for (key, id) in &entries {
+        for (key, id, eps) in &entries {
             let hits = tree.knn_from_entry(*id, 6, false, ()).unwrap();
             assert_eq!(hits.len(), 6);
             let mut brute: Vec<f64> = entries
                 .iter()
-                .filter(|(_, other)| other != id)
-                .map(|(other, _)| dist.distance(key, other))
+                .filter(|(_, other, _)| other != id)
+                .map(|(other, _, oeps)| metric_d(key, *eps, other, *oeps))
                 .collect();
             brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
             for (hit, expected) in hits.iter().zip(brute.iter()) {
                 assert!(
-                    (hit.1 - *expected).abs() < 1e-6,
+                    (hit.1 - *expected).abs() < 1e-9,
                     "key={key:?} knn={} brute={expected}",
                     hit.1
                 );
@@ -1204,13 +1214,13 @@ mod tests {
 
     /// Dieselbe Punktmenge und dieselben 400 Ersetzungen, gefiltert.
     /// Immer-wahr bleibt auf der gefilterten Bahn und trifft die ungefilterte Suche.
-    /// Je ohne Hint, mit Hint und über `knn_from_entry`.
+    /// Je ohne Hint, mit Hint und über `knn_from_entry`. Naive: `d+|εa−εb|`.
     #[test]
     fn knn_from_entry_filtered_matches_naive_after_replaces() {
         use crate::EntryId;
 
         const K: usize = 13;
-        const TOL: f64 = 1e-6;
+        const TOL: f64 = 1e-9;
 
         fn even_slot(id: EntryId, _: &String) -> bool {
             id.slot_index() % 2 == 0
@@ -1245,41 +1255,53 @@ mod tests {
                 .unwrap();
         }
 
-        let dist = Euclid2d;
         let ids: Vec<_> = tree.iter().collect();
         let entries: Vec<_> = ids
             .iter()
-            .map(|id| (tree.key(*id).unwrap(), *id))
+            .map(|id| {
+                (
+                    tree.key(*id).unwrap(),
+                    *id,
+                    tree.epsilon(*id).unwrap(),
+                )
+            })
             .collect();
 
-        let reference = |key: &(i64, i64), skip: Option<EntryId>, even_only: bool| {
-            let mut brute: Vec<f64> = entries
-                .iter()
-                .filter(|(_, other)| skip != Some(*other))
-                .filter(|(_, other)| !even_only || even_slot(*other, &String::new()))
-                .map(|(other, _)| dist.distance(key, other))
-                .collect();
-            brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            brute.truncate(K);
-            brute
-        };
+        // needle_eps: 0 für knn_search, Eintrags-ε für knn_from_entry.
+        let reference =
+            |key: &(i64, i64), needle_eps: f64, skip: Option<EntryId>, even_only: bool| {
+                let mut brute: Vec<f64> = entries
+                    .iter()
+                    .filter(|(_, other, _)| skip != Some(*other))
+                    .filter(|(_, other, _)| !even_only || even_slot(*other, &String::new()))
+                    .map(|(other, _, oeps)| metric_d(key, needle_eps, other, *oeps))
+                    .collect();
+                brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                brute.truncate(K);
+                brute
+            };
 
-        for (idx, (key, id)) in entries.iter().enumerate() {
+        for (idx, (key, id, eps)) in entries.iter().enumerate() {
             let hint = entries[(idx + 1) % entries.len()].1;
 
             let plain = tree.knn_search(key, K, ());
             let plain_d: Vec<f64> = plain.iter().map(|(_, d)| *d).collect();
+            assert_dists(
+                &plain_d,
+                &reference(key, 0.0, None, false),
+                &format!("search key={key:?}"),
+            );
             let all_on =
                 tree.knn_search(key, K, KnnConfig::new().with_active(|_, _: &String| true));
             let all_d: Vec<f64> = all_on.iter().map(|(_, d)| *d).collect();
-            assert_dists(&all_d, &plain_d, &format!("search key={key:?}"));
+            assert_dists(&all_d, &plain_d, &format!("search-all key={key:?}"));
 
             let subset = tree.knn_search(key, K, KnnConfig::new().with_active(even_slot));
             assert!(subset.iter().all(|(id, _)| even_slot(*id, &String::new())));
             let subset_d: Vec<f64> = subset.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_d,
-                &reference(key, None, true),
+                &reference(key, 0.0, None, true),
                 &format!("search-half key={key:?}"),
             );
 
@@ -1304,7 +1326,7 @@ mod tests {
             let subset_hd: Vec<f64> = subset_h.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_hd,
-                &reference(key, None, true),
+                &reference(key, 0.0, None, true),
                 &format!("hint-half key={key:?}"),
             );
 
@@ -1322,7 +1344,7 @@ mod tests {
             assert_dists(&all_ed, &plain_ed, &format!("entry key={key:?}"));
             assert_dists(
                 &plain_ed,
-                &reference(key, Some(*id), false),
+                &reference(key, *eps, Some(*id), false),
                 &format!("entry-plain key={key:?}"),
             );
 
@@ -1335,7 +1357,7 @@ mod tests {
             let subset_ed: Vec<f64> = subset_e.iter().map(|(_, d)| *d).collect();
             assert_dists(
                 &subset_ed,
-                &reference(key, Some(*id), true),
+                &reference(key, *eps, Some(*id), true),
                 &format!("entry-half key={key:?}"),
             );
         }
@@ -1343,13 +1365,16 @@ mod tests {
 
     /// Zufällige insert/erase, ein Thread (`&mut self`): kNN und Radius bleiben bei der Referenz.
     /// Seed `0x5A17_5EED` (xorshift64). Knoten 2/4, damit Split, Donate und Merge oft laufen.
+    /// Inserts mit Identity-ε; Naive nutzt `d+|εa−εb|`.
     #[test]
     fn knn_matches_naive_under_random_replaces() {
-        use crate::EntryId;
+        use crate::{epsilon_from, EntryId};
 
         const SEED: u64 = 0x5A17_5EED;
         const K: usize = 5;
-        const TOL: f64 = 1e-6;
+        const TOL: f64 = 1e-9;
+
+        type Live = (EntryId, (i64, i64), f64);
 
         fn xorshift64(state: &mut u64) -> u64 {
             let mut x = *state;
@@ -1360,31 +1385,25 @@ mod tests {
             x
         }
 
-        // *3-Gitter: Distanz exakt 25 ist unmöglich, Identity-ε verschiebt die Kugel nicht.
-        fn draw_key(state: &mut u64, live: &[(EntryId, (i64, i64))]) -> (i64, i64) {
+        // *3-Gitter: Distanz exakt 25 ist unmöglich; ε verschiebt die Radius-Kugel nicht über die Grenze.
+        fn draw_key(state: &mut u64, live: &[Live]) -> (i64, i64) {
             loop {
                 let x = ((xorshift64(state) % 81) as i64 - 40) * 3;
                 let y = ((xorshift64(state) % 81) as i64 - 40) * 3;
-                if live.iter().all(|(_, key)| *key != (x, y)) {
+                if live.iter().all(|(_, key, _)| *key != (x, y)) {
                     return (x, y);
                 }
             }
         }
 
-        fn assert_knn(
-            tree: &TreeI64,
-            live: &[(EntryId, (i64, i64))],
-            id: EntryId,
-            key: (i64, i64),
-            op: u64,
-        ) {
+        fn assert_knn(tree: &TreeI64, live: &[Live], id: EntryId, key: (i64, i64), eps: f64, op: u64) {
             let hits = tree.knn_from_entry(id, K, false, ()).unwrap_or_else(|| {
                 panic!("seed={SEED:#x} op={op} key={key:?} knn=fehlt brute=fehlt");
             });
             let mut brute: Vec<f64> = live
                 .iter()
-                .filter(|(other, _)| *other != id)
-                .map(|(_, other)| Euclid2d.distance(&key, other))
+                .filter(|(other, _, _)| *other != id)
+                .map(|(_, other, oeps)| metric_d(&key, eps, other, *oeps))
                 .collect();
             brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
             assert!(
@@ -1402,42 +1421,26 @@ mod tests {
             }
         }
 
-        // Alle 100 Operationen nur fünf Ids, nicht der ganze Bestand.
-        fn spot_check(
-            tree: &TreeI64,
-            live: &[(EntryId, (i64, i64))],
-            rng: &mut u64,
-            op: u64,
-        ) {
+        fn spot_check(tree: &TreeI64, live: &[Live], rng: &mut u64, op: u64) {
             for _ in 0..5 {
                 let idx = (xorshift64(rng) as usize) % live.len();
-                let (id, key) = live[idx];
-                assert_knn(tree, live, id, key, op);
+                let (id, key, eps) = live[idx];
+                assert_knn(tree, live, id, key, eps, op);
             }
         }
 
-        fn insert_one(
-            tree: &mut TreeI64,
-            live: &mut Vec<(EntryId, (i64, i64))>,
-            rng: &mut u64,
-            op: &mut u64,
-        ) {
+        fn insert_one(tree: &mut TreeI64, live: &mut Vec<Live>, rng: &mut u64, op: &mut u64) {
             let key = draw_key(rng, live);
             *op += 1;
             let id = tree
                 .insert_with_identity(key, format!("v{}", *op), &*op)
                 .unwrap();
-            live.push((id, key));
+            live.push((id, key, epsilon_from(&*op)));
         }
 
-        fn erase_one(
-            tree: &mut TreeI64,
-            live: &mut Vec<(EntryId, (i64, i64))>,
-            rng: &mut u64,
-            op: &mut u64,
-        ) {
+        fn erase_one(tree: &mut TreeI64, live: &mut Vec<Live>, rng: &mut u64, op: &mut u64) {
             let idx = (xorshift64(rng) as usize) % live.len();
-            let (id, key) = live.swap_remove(idx);
+            let (id, key, _) = live.swap_remove(idx);
             *op += 1;
             assert!(
                 tree.erase_by_id(id),
@@ -1448,9 +1451,8 @@ mod tests {
         let mut rng = SEED;
         let mut op = 0u64;
         let mut tree = MTree::with_params(2, 4, 3, Euclid2d);
-        let mut live: Vec<(EntryId, (i64, i64))> = Vec::new();
+        let mut live: Vec<Live> = Vec::new();
 
-        // Zuerst 200 eindeutige Keys, danach 2000 gemischte Operationen (Bestand etwa 80 bis 200).
         while live.len() < 200 {
             insert_one(&mut tree, &mut live, &mut rng, &mut op);
             if op % 100 == 0 {
@@ -1481,10 +1483,11 @@ mod tests {
             tree.size(),
             live.len()
         );
-        for &(id, key) in &live {
-            assert_knn(&tree, &live, id, key, op);
+        for &(id, key, eps) in &live {
+            assert_knn(&tree, &live, id, key, eps, op);
         }
 
+        // range_search Default-Needle-ε=0 (nicht Eintrags-ε).
         let got_ids: Vec<_> = tree
             .range_search(&qkey, RangeSearchConfig::new(25.0))
             .map(|(id, _)| id)
@@ -1493,11 +1496,10 @@ mod tests {
             .iter()
             .map(|id| tree.key(*id).unwrap())
             .collect();
-        let naive_rows: Vec<((i64, i64), String)> =
-            live.iter().map(|(_, key)| (*key, String::new())).collect();
-        let expect: BTreeSet<_> = naive_range_search(&naive_rows, &qkey, 25.0)
-            .into_iter()
-            .map(|(key, _)| key)
+        let expect: BTreeSet<_> = live
+            .iter()
+            .filter(|(_, key, eps)| metric_d(&qkey, 0.0, key, *eps) <= 25.0)
+            .map(|(_, key, _)| *key)
             .collect();
         assert_eq!(
             got,
@@ -1510,14 +1512,17 @@ mod tests {
 
     /// Wie `knn_matches_naive_under_random_replaces`, plus umschaltbare Aktiv-Menge.
     /// Jede Stichprobe: ohne Hint, mit Hint, und `knn_from_entry`.
+    /// Naive nutzt `d+|εa−εb|` (`knn_search` Needle-ε=0, `knn_from_entry` Eintrags-ε).
     #[test]
     fn knn_filtered_matches_naive_under_random_replaces() {
-        use crate::EntryId;
+        use crate::{epsilon_from, EntryId};
         use std::collections::HashSet;
 
         const SEED: u64 = 0x5A17_5EED;
         const K: usize = 5;
-        const TOL: f64 = 1e-6;
+        const TOL: f64 = 1e-9;
+
+        type Live = (EntryId, (i64, i64), f64);
 
         fn xorshift64(state: &mut u64) -> u64 {
             let mut x = *state;
@@ -1528,28 +1533,29 @@ mod tests {
             x
         }
 
-        fn draw_key(state: &mut u64, live: &[(EntryId, (i64, i64))]) -> (i64, i64) {
+        fn draw_key(state: &mut u64, live: &[Live]) -> (i64, i64) {
             loop {
                 let x = ((xorshift64(state) % 81) as i64 - 40) * 3;
                 let y = ((xorshift64(state) % 81) as i64 - 40) * 3;
-                if live.iter().all(|(_, key)| *key != (x, y)) {
+                if live.iter().all(|(_, key, _)| *key != (x, y)) {
                     return (x, y);
                 }
             }
         }
 
         fn reference(
-            live: &[(EntryId, (i64, i64))],
+            live: &[Live],
             key: (i64, i64),
+            needle_eps: f64,
             self_id: EntryId,
             exclude_self: bool,
             keep: impl Fn(EntryId) -> bool,
         ) -> Vec<f64> {
             let mut brute: Vec<f64> = live
                 .iter()
-                .filter(|(other, _)| !exclude_self || *other != self_id)
-                .filter(|(other, _)| keep(*other))
-                .map(|(_, other)| Euclid2d.distance(&key, other))
+                .filter(|(other, _, _)| !exclude_self || *other != self_id)
+                .filter(|(other, _, _)| keep(*other))
+                .map(|(_, other, oeps)| metric_d(&key, needle_eps, other, *oeps))
                 .collect();
             brute.sort_by(|a, b| a.partial_cmp(b).unwrap());
             brute.truncate(K);
@@ -1575,21 +1581,22 @@ mod tests {
 
         fn check_id(
             tree: &TreeI64,
-            live: &[(EntryId, (i64, i64))],
+            live: &[Live],
             active: &HashSet<EntryId>,
             idx: usize,
             op: u64,
         ) {
-            let (id, key) = live[idx];
+            let (id, key, eps) = live[idx];
             let hint = live
                 .iter()
-                .find(|(other, _)| *other != id && !active.contains(other))
-                .map(|(other, _)| *other)
+                .find(|(other, _, _)| *other != id && !active.contains(other))
+                .map(|(other, _, _)| *other)
                 .unwrap_or(live[(idx + 1) % live.len()].0);
             let tag = format!("seed={SEED:#x} op={op} key={key:?}");
 
+            // knn_search: Default-Needle-ε=0
             let plain = tree.knn_search(&key, K, ());
-            let expect_all = reference(live, key, id, false, |_| true);
+            let expect_all = reference(live, key, 0.0, id, false, |_| true);
             assert_dists(&hit_dists(&plain), &expect_all, &format!("{tag} search"));
 
             let all_on =
@@ -1606,7 +1613,7 @@ mod tests {
                 KnnConfig::new().with_active(|oid: EntryId, _: &String| active.contains(&oid)),
             );
             assert!(subset.iter().all(|(id, _)| active.contains(id)));
-            let expect_sub = reference(live, key, id, false, |oid| active.contains(&oid));
+            let expect_sub = reference(live, key, 0.0, id, false, |oid| active.contains(&oid));
             assert_dists(
                 &hit_dists(&subset),
                 &expect_sub,
@@ -1641,10 +1648,11 @@ mod tests {
                 &format!("{tag} hint-sub"),
             );
 
+            // knn_from_entry: Needle-ε = Eintrags-ε
             let plain_e = tree.knn_from_entry(id, K, false, ()).unwrap_or_else(|| {
                 panic!("{tag} entry knn=fehlt");
             });
-            let expect_entry = reference(live, key, id, true, |_| true);
+            let expect_entry = reference(live, key, eps, id, true, |_| true);
             assert_dists(&hit_dists(&plain_e), &expect_entry, &format!("{tag} entry"));
             let all_e = tree
                 .knn_from_entry(
@@ -1670,7 +1678,7 @@ mod tests {
             assert!(subset_e
                 .iter()
                 .all(|(hit, _)| *hit != id && active.contains(hit)));
-            let expect_entry_sub = reference(live, key, id, true, |oid| active.contains(&oid));
+            let expect_entry_sub = reference(live, key, eps, id, true, |oid| active.contains(&oid));
             assert_dists(
                 &hit_dists(&subset_e),
                 &expect_entry_sub,
@@ -1680,7 +1688,7 @@ mod tests {
 
         fn spot_check(
             tree: &TreeI64,
-            live: &[(EntryId, (i64, i64))],
+            live: &[Live],
             active: &HashSet<EntryId>,
             rng: &mut u64,
             op: u64,
@@ -1693,7 +1701,7 @@ mod tests {
 
         fn insert_one(
             tree: &mut TreeI64,
-            live: &mut Vec<(EntryId, (i64, i64))>,
+            live: &mut Vec<Live>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,
             op: &mut u64,
@@ -1706,18 +1714,18 @@ mod tests {
             if xorshift64(rng) & 1 == 0 {
                 active.insert(id);
             }
-            live.push((id, key));
+            live.push((id, key, epsilon_from(&*op)));
         }
 
         fn erase_one(
             tree: &mut TreeI64,
-            live: &mut Vec<(EntryId, (i64, i64))>,
+            live: &mut Vec<Live>,
             active: &mut HashSet<EntryId>,
             rng: &mut u64,
             op: &mut u64,
         ) {
             let idx = (xorshift64(rng) as usize) % live.len();
-            let (id, key) = live.swap_remove(idx);
+            let (id, key, _) = live.swap_remove(idx);
             *op += 1;
             active.remove(&id);
             assert!(
@@ -1726,12 +1734,7 @@ mod tests {
             );
         }
 
-        fn flip_one(
-            live: &[(EntryId, (i64, i64))],
-            active: &mut HashSet<EntryId>,
-            rng: &mut u64,
-            op: &mut u64,
-        ) {
+        fn flip_one(live: &[Live], active: &mut HashSet<EntryId>, rng: &mut u64, op: &mut u64) {
             let idx = (xorshift64(rng) as usize) % live.len();
             let id = live[idx].0;
             *op += 1;
@@ -1743,7 +1746,7 @@ mod tests {
         let mut rng = SEED;
         let mut op = 0u64;
         let mut tree = MTree::with_params(2, 4, 3, Euclid2d);
-        let mut live: Vec<(EntryId, (i64, i64))> = Vec::new();
+        let mut live: Vec<Live> = Vec::new();
         let mut active: HashSet<EntryId> = HashSet::new();
 
         while live.len() < 200 {
@@ -1772,5 +1775,454 @@ mod tests {
         for idx in 0..live.len() {
             check_id(&tree, &live, &active, idx, op);
         }
+    }
+
+    // ---- kNN-Graph / RkNN (A1–A5) ----
+
+    fn new_tree_i64_graph(k_max: usize) -> TreeI64 {
+        MTree::with_knn_graph(k_max, Euclid2d)
+    }
+
+    fn naive_rknn(
+        data: &[((i64, i64), crate::EntryId)],
+        needle: &(i64, i64),
+        k: usize,
+    ) -> Vec<(crate::EntryId, f64)> {
+        let dist = Euclid2d;
+        let mut out = Vec::new();
+        for &(key_o, id_o) in data {
+            let mut dists: Vec<f64> = data
+                .iter()
+                .filter(|(_, id)| *id != id_o)
+                .map(|(key_p, _)| dist.distance(&key_o, key_p))
+                .collect();
+            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let knn_d = if dists.len() < k {
+                f64::INFINITY
+            } else {
+                dists[k - 1]
+            };
+            let d = dist.distance(needle, &key_o);
+            if d <= knn_d {
+                out.push((id_o, d));
+            }
+        }
+        out.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.slot_index().cmp(&b.0.slot_index()))
+        });
+        out
+    }
+
+    fn assert_graph_invariants(tree: &TreeI64) {
+        let k_max = tree.knn_graph_k_max().expect("graph on");
+        let ids: Vec<_> = tree.iter().collect();
+        for &id in &ids {
+            let list = tree.knn_graph_neighbors(id).unwrap_or(&[]);
+            assert!(list.len() <= k_max, "forward longer than k_max");
+            for i in 1..list.len() {
+                assert!(
+                    list[i - 1].1 <= list[i].1 + 1e-12,
+                    "forward not sorted by dist"
+                );
+            }
+            for &(nb, _) in list {
+                assert!(tree.key(nb).is_some(), "forward neighbor missing");
+            }
+        }
+    }
+
+    #[test]
+    fn rknn_disabled_returns_none() {
+        let mut tree = new_tree_i64();
+        let id = tree.insert((0, 0), "a".into()).unwrap();
+        assert!(tree.rknn_search(&(0, 0), 1).is_none());
+        assert!(tree.rknn_from_entry(id, 1).is_none());
+        assert!(!tree.knn_graph_enabled());
+    }
+
+    #[test]
+    fn rknn_matches_naive_after_inserts() {
+        for &k_max in &[1usize, 5, 10] {
+            let mut tree = new_tree_i64_graph(k_max);
+            let mut data = Vec::new();
+            for i in 0..40 {
+                let key = (i as i64 % 7, i as i64 / 7);
+                let id = tree.insert(key, format!("v{i}")).unwrap();
+                data.push((key, id));
+            }
+            assert_graph_invariants(&tree);
+            for k in 1..=k_max {
+                for &(needle, _) in &data {
+                    let got = tree.rknn_search(&needle, k).unwrap();
+                    let expect = naive_rknn(&data, &needle, k);
+                    let got_ids: HashSet<_> = got.iter().map(|(id, _)| *id).collect();
+                    let exp_ids: HashSet<_> = expect.iter().map(|(id, _)| *id).collect();
+                    assert_eq!(
+                        got_ids, exp_ids,
+                        "k_max={k_max} k={k} needle={needle:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rknn_graph_survives_erase_and_replace() {
+        let k_max = 5;
+        let mut tree = new_tree_i64_graph(k_max);
+        let mut data = Vec::new();
+        for i in 0..30 {
+            let key = (i, i * 2);
+            let id = tree.insert(key, format!("{i}")).unwrap();
+            data.push((key, id));
+        }
+        // Erase a few.
+        for _ in 0..5 {
+            let (_, id) = data.pop().unwrap();
+            assert!(tree.erase_by_id(id));
+        }
+        assert_graph_invariants(&tree);
+        let mut live: Vec<_> = data
+            .iter()
+            .copied()
+            .filter(|(_, id)| tree.key(*id).is_some())
+            .collect();
+        for &(needle, _) in &live {
+            let got = tree.rknn_search(&needle, k_max).unwrap();
+            let expect = naive_rknn(&live, &needle, k_max);
+            let got_ids: HashSet<_> = got.iter().map(|(id, _)| *id).collect();
+            let exp_ids: HashSet<_> = expect.iter().map(|(id, _)| *id).collect();
+            assert_eq!(got_ids, exp_ids);
+        }
+        // Replace-equivalent: erase + insert.
+        let (old_key, old_id) = live.pop().unwrap();
+        assert!(tree.erase_by_id(old_id));
+        let new_key = (old_key.0 + 100, old_key.1 + 100);
+        let new_id = tree.insert(new_key, "repl".into()).unwrap();
+        live.push((new_key, new_id));
+        assert_graph_invariants(&tree);
+        let got = tree.rknn_search(&new_key, k_max).unwrap();
+        let expect = naive_rknn(&live, &new_key, k_max);
+        let got_ids: HashSet<_> = got.iter().map(|(id, _)| *id).collect();
+        let exp_ids: HashSet<_> = expect.iter().map(|(id, _)| *id).collect();
+        assert_eq!(got_ids, exp_ids);
+    }
+
+    #[test]
+    fn rknn_update_key_keeps_invariants() {
+        let mut tree = new_tree_i64_graph(4);
+        let mut ids = Vec::new();
+        for i in 0..20 {
+            ids.push(tree.insert((i, 0), format!("{i}")).unwrap());
+        }
+        tree.update_key(ids[3], (3, 50)).unwrap();
+        assert_graph_invariants(&tree);
+        let mut data = Vec::new();
+        for &id in &ids {
+            let key = tree.key(id).unwrap();
+            data.push((key, id));
+        }
+        let needle = tree.key(ids[3]).unwrap();
+        let got = tree.rknn_search(&needle, 4).unwrap();
+        let expect = naive_rknn(&data, &needle, 4);
+        let got_ids: HashSet<_> = got.iter().map(|(id, _)| *id).collect();
+        let exp_ids: HashSet<_> = expect.iter().map(|(id, _)| *id).collect();
+        assert_eq!(got_ids, exp_ids);
+    }
+
+    #[test]
+    fn rknn_slot_reuse_clears_stale_reverse() {
+        let mut tree = new_tree_i64_graph(3);
+        let a = tree.insert((0, 0), "a".into()).unwrap();
+        let b = tree.insert((1, 0), "b".into()).unwrap();
+        let _c = tree.insert((2, 0), "c".into()).unwrap();
+        assert!(tree.erase_by_id(a));
+        let a2 = tree.insert((10, 10), "a2".into()).unwrap();
+        assert_eq!(a.slot_index(), a2.slot_index());
+        assert_graph_invariants(&tree);
+        // Neighbors of b must not list the recycled identity incorrectly as old coords.
+        if let Some(nbs) = tree.knn_graph_neighbors(b) {
+            for &(nb, _) in nbs {
+                assert!(tree.key(nb).is_some());
+            }
+        }
+        let _ = b;
+    }
+
+    #[test]
+    fn rknn_from_entry_excludes_self() {
+        let mut tree = new_tree_i64_graph(5);
+        let mut ids = Vec::new();
+        for i in 0..15 {
+            ids.push(tree.insert((i, i), format!("{i}")).unwrap());
+        }
+        let hits = tree.rknn_from_entry(ids[0], 5).unwrap();
+        assert!(hits.iter().all(|(id, _)| *id != ids[0]));
+    }
+
+    #[test]
+    fn insert_with_knn_hits_matches_plain_insert() {
+        let mut plain = new_tree_i64_graph(5);
+        let mut with_hits = new_tree_i64_graph(5);
+        let mut ids_plain = Vec::new();
+        for i in 0..12 {
+            let key = (i, 0);
+            ids_plain.push(plain.insert(key, format!("{i}")).unwrap());
+        }
+        let mut ids_hits = Vec::new();
+        for i in 0..12 {
+            let key = (i, 0);
+            let hits: Vec<_> = with_hits
+                .knn_search(&key, 5, ())
+                .into_iter()
+                .map(|(id, d)| (id, d))
+                .collect();
+            ids_hits.push(
+                with_hits
+                    .insert_with_knn_hits(key, format!("{i}"), &hits)
+                    .unwrap(),
+            );
+        }
+        for i in 0..12 {
+            let ka = plain.key(ids_plain[i]).unwrap();
+            let kb = with_hits.key(ids_hits[i]).unwrap();
+            assert_eq!(ka, kb);
+            let ra = plain.rknn_search(&ka, 5).unwrap();
+            let rb = with_hits.rknn_search(&kb, 5).unwrap();
+            let sa: BTreeSet<_> = ra.iter().map(|(id, _)| plain.key(*id).unwrap()).collect();
+            let sb: BTreeSet<_> = rb.iter().map(|(id, _)| with_hits.key(*id).unwrap()).collect();
+            assert_eq!(sa, sb);
+        }
+    }
+
+    /// Stress wie `knn_matches_naive_under_random_replaces`, aber mit kNN-Graph:
+    /// Invarianten, Forward-Listen vs. Naive-kNN, `rknn_search` vs. Naive-RkNN.
+    /// Inserts mit Identity-ε ≠ 0; Naive nutzt dieselbe Metrik `d+|εa−εb|`.
+    #[test]
+    fn rknn_matches_naive_under_random_replaces() {
+        use crate::{epsilon_from, EntryId};
+
+        const SEED: u64 = 0x2B17_5EED;
+        const K_MAX: usize = 5;
+        const TOL: f64 = 1e-9;
+
+        /// Live-Eintrag: id, key, deterministisches Identity-ε.
+        type Live = (EntryId, (i64, i64), f64);
+
+        fn xorshift64(state: &mut u64) -> u64 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            x
+        }
+
+        fn draw_key(state: &mut u64, live: &[Live]) -> (i64, i64) {
+            loop {
+                let x = ((xorshift64(state) % 81) as i64 - 40) * 3;
+                let y = ((xorshift64(state) % 81) as i64 - 40) * 3;
+                if live.iter().all(|(_, key, _)| *key != (x, y)) {
+                    return (x, y);
+                }
+            }
+        }
+
+        fn naive_forward(live: &[Live], id: EntryId, key: (i64, i64), eps: f64) -> Vec<(EntryId, f64)> {
+            let mut brute: Vec<(EntryId, f64)> = live
+                .iter()
+                .filter(|(other, _, _)| *other != id)
+                .map(|(oid, okey, oeps)| (*oid, metric_d(&key, eps, okey, *oeps)))
+                .collect();
+            brute.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.slot_index().cmp(&b.0.slot_index()))
+            });
+            brute.truncate(K_MAX.min(brute.len()));
+            brute
+        }
+
+        fn naive_rknn_eps(
+            live: &[Live],
+            needle: &(i64, i64),
+            needle_eps: f64,
+        ) -> Vec<(EntryId, f64)> {
+            let mut out = Vec::new();
+            for &(id_o, key_o, eps_o) in live {
+                let mut neighbors: Vec<(EntryId, f64)> = live
+                    .iter()
+                    .filter(|(id, _, _)| *id != id_o)
+                    .map(|(id_p, key_p, eps_p)| (*id_p, metric_d(&key_o, eps_o, key_p, *eps_p)))
+                    .collect();
+                neighbors.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.slot_index().cmp(&b.0.slot_index()))
+                });
+                let knn_d = if neighbors.len() < K_MAX {
+                    f64::INFINITY
+                } else {
+                    neighbors[K_MAX - 1].1
+                };
+                let d = metric_d(needle, needle_eps, &key_o, eps_o);
+                if d <= knn_d {
+                    out.push((id_o, d));
+                }
+            }
+            out.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.slot_index().cmp(&b.0.slot_index()))
+            });
+            out
+        }
+
+        fn assert_forward(tree: &TreeI64, live: &[Live], id: EntryId, key: (i64, i64), eps: f64, op: u64) {
+            let list = tree.knn_graph_neighbors(id).unwrap_or(&[]);
+            let expect = naive_forward(live, id, key, eps);
+            assert_eq!(
+                list.len(),
+                expect.len(),
+                "seed={SEED:#x} op={op} key={key:?} forward len {} vs {}",
+                list.len(),
+                expect.len()
+            );
+            for (got, exp) in list.iter().zip(expect.iter()) {
+                assert_eq!(
+                    got.0, exp.0,
+                    "seed={SEED:#x} op={op} key={key:?} forward id mismatch"
+                );
+                assert!(
+                    (got.1 - exp.1).abs() < TOL,
+                    "seed={SEED:#x} op={op} key={key:?} forward dist {} vs {}",
+                    got.1,
+                    exp.1
+                );
+            }
+        }
+
+        fn assert_rknn(
+            tree: &TreeI64,
+            live: &[Live],
+            needle: (i64, i64),
+            needle_eps: f64,
+            op: u64,
+        ) {
+            let got = tree
+                .rknn_search_eps(&needle, needle_eps, K_MAX)
+                .unwrap_or_else(|| {
+                    panic!("seed={SEED:#x} op={op} key={needle:?} rknn=None");
+                });
+            let expect = naive_rknn_eps(live, &needle, needle_eps);
+            let got_ids: HashSet<_> = got.iter().map(|(id, _)| *id).collect();
+            let exp_ids: HashSet<_> = expect.iter().map(|(id, _)| *id).collect();
+            assert_eq!(
+                got_ids, exp_ids,
+                "seed={SEED:#x} op={op} key={needle:?} eps={needle_eps} rknn set mismatch got={} exp={}",
+                got_ids.len(),
+                exp_ids.len()
+            );
+            for (id, d) in &got {
+                let exp_d = expect
+                    .iter()
+                    .find(|(eid, _)| eid == id)
+                    .map(|(_, ed)| *ed)
+                    .unwrap();
+                assert!(
+                    (d - exp_d).abs() < TOL,
+                    "seed={SEED:#x} op={op} key={needle:?} rknn dist {d} vs {exp_d}"
+                );
+            }
+        }
+
+        fn spot_check(tree: &TreeI64, live: &[Live], rng: &mut u64, op: u64) {
+            assert_graph_invariants(tree);
+            for _ in 0..5 {
+                let idx = (xorshift64(rng) as usize) % live.len();
+                let (id, key, eps) = live[idx];
+                assert_forward(tree, live, id, key, eps, op);
+                // Query mit dem ε des gespeicherten Eintrags (nicht ε=0).
+                assert_rknn(tree, live, key, eps, op);
+            }
+        }
+
+        fn insert_one(tree: &mut TreeI64, live: &mut Vec<Live>, rng: &mut u64, op: &mut u64) {
+            let key = draw_key(rng, live);
+            *op += 1;
+            let id = tree
+                .insert_with_identity(key, format!("v{}", *op), &*op)
+                .unwrap();
+            let eps = epsilon_from(&*op);
+            debug_assert!((tree.get(id).unwrap().epsilon() - eps).abs() < 1e-18);
+            live.push((id, key, eps));
+        }
+
+        fn erase_one(tree: &mut TreeI64, live: &mut Vec<Live>, rng: &mut u64, op: &mut u64) {
+            let idx = (xorshift64(rng) as usize) % live.len();
+            let (id, key, _) = live.swap_remove(idx);
+            *op += 1;
+            assert!(
+                tree.erase_by_id(id),
+                "seed={SEED:#x} op={op} key={key:?} erase failed"
+            );
+        }
+
+        fn update_one(tree: &mut TreeI64, live: &mut Vec<Live>, rng: &mut u64, op: &mut u64) {
+            let idx = (xorshift64(rng) as usize) % live.len();
+            let (id, _, eps) = live[idx];
+            let new_key = draw_key(rng, live);
+            *op += 1;
+            tree.update_key(id, new_key).unwrap_or_else(|e| {
+                panic!("seed={SEED:#x} op={op} update_key={e:?}");
+            });
+            // Identity-Hash (und damit ε) bleibt bei update_key erhalten.
+            live[idx].1 = new_key;
+            debug_assert!((tree.get(id).unwrap().epsilon() - eps).abs() < 1e-18);
+        }
+
+        let mut rng = SEED;
+        let mut op = 0u64;
+        // Kleine Nodes → viele Splits; Graph explizit aktivieren.
+        let mut tree = MTree::with_params(2, 4, 3, Euclid2d);
+        tree.knn_graph = Some(crate::knn_graph::KnnGraph::new(K_MAX));
+        let mut live: Vec<Live> = Vec::new();
+
+        while live.len() < 200 {
+            insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            if op % 100 == 0 {
+                spot_check(&tree, &live, &mut rng, op);
+            }
+        }
+        for _ in 0..2_000 {
+            let roll = xorshift64(&mut rng) % 5;
+            if live.len() > 200 {
+                erase_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else if live.len() < 80 {
+                insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else if roll == 0 {
+                update_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else if roll <= 2 {
+                insert_one(&mut tree, &mut live, &mut rng, &mut op);
+            } else {
+                erase_one(&mut tree, &mut live, &mut rng, &mut op);
+            }
+            if op % 100 == 0 {
+                spot_check(&tree, &live, &mut rng, op);
+            }
+        }
+
+        assert_eq!(tree.size(), live.len(), "seed={SEED:#x} op={op} size mismatch");
+        assert_graph_invariants(&tree);
+        for &(id, key, eps) in &live {
+            assert_forward(&tree, &live, id, key, eps, op);
+            assert_rknn(&tree, &live, key, eps, op);
+        }
+        // Auch RkNN von außen (Needle-ε=0) und mit fremdem ε.
+        let outside = draw_key(&mut rng, &live);
+        assert_rknn(&tree, &live, outside, 0.0, op);
+        assert_rknn(&tree, &live, outside, epsilon_from(&999_999u64), op);
     }
 }

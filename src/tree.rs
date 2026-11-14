@@ -4,6 +4,7 @@
 
 use crate::distance::{Distance, DynDistance, EuclideanDistance};
 use crate::entry::{DuplicateKey, EntryId, UpdateKeyError};
+use crate::knn_graph::KnnGraph;
 use crate::node::{NodeId, NodePtr, ObjectNode, RoutingNode};
 use crate::stats::{DescendantCounter, NodeStats};
 use std::cmp::Ordering;
@@ -34,6 +35,8 @@ where
     key_index: HashMap<K, HashMap<u64, EntryId>>,
     entry_count: usize,
     pub(crate) distance_fn: Dist,
+    /// Opt-in materialisierter kNN-Graph für RkNN (None = aus).
+    pub(crate) knn_graph: Option<KnnGraph>,
 }
 
 impl<K, V, D, S, Dist> Clone for MTree<K, V, D, S, Dist>
@@ -62,6 +65,7 @@ where
             key_index: self.key_index.clone(),
             entry_count: self.entry_count,
             distance_fn: self.distance_fn.clone(),
+            knn_graph: self.knn_graph.clone(),
         }
     }
 }
@@ -337,6 +341,7 @@ where
             key_index: HashMap::new(),
             entry_count: 0,
             distance_fn: DynDistance::new(distance_fn),
+            knn_graph: None,
         }
     }
 }
@@ -360,7 +365,15 @@ where
             key_index: HashMap::new(),
             entry_count: 0,
             distance_fn,
+            knn_graph: None,
         }
+    }
+
+    /// Wie [`with_distance`], mit materialisiertem kNN-Graph (`k_max` ≥ 1) für RkNN.
+    pub fn with_knn_graph(k_max: usize, distance_fn: F) -> Self {
+        let mut tree = Self::with_distance(distance_fn);
+        tree.knn_graph = Some(KnnGraph::new(k_max));
+        tree
     }
 
     /// Erstellt einen neuen M-Tree mit benutzerdefinierten Parametern (monomorph).
@@ -381,6 +394,7 @@ where
             key_index: HashMap::new(),
             entry_count: 0,
             distance_fn,
+            knn_graph: None,
         }
     }
 
@@ -391,6 +405,17 @@ where
     pub fn with_capacity_hint(expected_entries: usize, distance_fn: F) -> Self {
         let (min, max, split) = node_params_for_capacity(expected_entries);
         Self::with_params(min, max, split, distance_fn)
+    }
+
+    /// Wie [`with_capacity_hint`], mit kNN-Graph.
+    pub fn with_capacity_hint_knn_graph(
+        expected_entries: usize,
+        k_max: usize,
+        distance_fn: F,
+    ) -> Self {
+        let mut tree = Self::with_capacity_hint(expected_entries, distance_fn);
+        tree.knn_graph = Some(KnnGraph::new(k_max));
+        tree
     }
 }
 
@@ -411,6 +436,7 @@ where
             key_index: HashMap::new(),
             entry_count: 0,
             distance_fn: EuclideanDistance,
+            knn_graph: None,
         }
     }
 }
@@ -432,6 +458,7 @@ where
             key_index: HashMap::new(),
             entry_count: 0,
             distance_fn: EuclideanDistance,
+            knn_graph: None,
         }
     }
 }
@@ -500,12 +527,19 @@ where
             self.by_id.push(None);
             index
         };
+        if let Some(graph) = self.knn_graph.as_mut() {
+            graph.ensure_slot(index);
+            graph.release_slot(EntryId::from_index(index));
+        }
         EntryId::from_index(index)
     }
 
     fn release_slot(&mut self, id: EntryId) {
         let index = id.index();
         self.by_id[index] = None;
+        if let Some(graph) = self.knn_graph.as_mut() {
+            graph.release_slot(id);
+        }
         self.free_list.push(index);
         self.entry_count -= 1;
     }
@@ -516,7 +550,7 @@ where
         id
     }
 
-    fn metric(&self, a: &K, eps_a: f64, b: &K, eps_b: f64) -> D {
+    pub(crate) fn metric(&self, a: &K, eps_a: f64, b: &K, eps_b: f64) -> D {
         metric_distance(&self.distance_fn, a, eps_a, b, eps_b)
     }
 
@@ -566,7 +600,17 @@ where
 
     /// Fügt einen Eintrag in den Baum ein (Identity-Hash `0`, `ε = 0`).
     pub fn insert(&mut self, key: K, value: V) -> Result<EntryId, DuplicateKey> {
-        self.insert_with_identity_hash(key, value, 0)
+        self.insert_with_identity_hash(key, value, 0, None)
+    }
+
+    /// Insert mit optionalen vorberechneten kNN-Hits (überspringt Forward-Aufbau im Graph).
+    pub fn insert_with_knn_hits(
+        &mut self,
+        key: K,
+        value: V,
+        hits: &[(EntryId, f64)],
+    ) -> Result<EntryId, DuplicateKey> {
+        self.insert_with_identity_hash(key, value, 0, Some(hits))
     }
 
     /// Insert mit Identitätsquelle (Index, Timestamp, …). Gleiche Koordinaten sind erlaubt,
@@ -577,7 +621,12 @@ where
         value: V,
         identity: &I,
     ) -> Result<EntryId, DuplicateKey> {
-        self.insert_with_identity_hash(key, value, crate::distance::identity_hash(identity))
+        self.insert_with_identity_hash(
+            key,
+            value,
+            crate::distance::identity_hash(identity),
+            None,
+        )
     }
 
     fn insert_with_identity_hash(
@@ -585,6 +634,7 @@ where
         key: K,
         value: V,
         identity_hash: u64,
+        knn_hits: Option<&[(EntryId, f64)]>,
     ) -> Result<EntryId, DuplicateKey> {
         if self
             .key_index
@@ -612,6 +662,8 @@ where
         } else {
             self.install_first_root(id);
         }
+
+        self.knn_graph_maintain_insert(id, knn_hits);
 
         Ok(id)
     }
@@ -1204,6 +1256,7 @@ where
             None => return false,
         };
 
+        self.knn_graph_maintain_erase(id);
         self.tree_erase(id);
         self.index_remove(&key, identity_hash);
         self.release_slot(id);
@@ -1268,6 +1321,7 @@ where
             }
         }
 
+        self.knn_graph_maintain_erase(id);
         self.tree_erase(id);
 
         self.by_id
@@ -1289,6 +1343,8 @@ where
         } else {
             self.install_first_root(id);
         }
+
+        self.knn_graph_maintain_insert(id, None);
 
         Ok(())
     }
@@ -1630,6 +1686,9 @@ where
         self.free_list.clear();
         self.key_index.clear();
         self.entry_count = 0;
+        if let Some(graph) = self.knn_graph.as_mut() {
+            graph.clear();
+        }
     }
 
     /// Anzahl der Einträge
