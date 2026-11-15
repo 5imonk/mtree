@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mtree-experiment · Viz Hub</title>
+    <link rel="stylesheet" href="css/dashboard.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <div class="layout">
+      <nav>
+        <h1>mtree-experiment</h1>
+        <div class="subtitle">Standalone Viz Hub</div>
+
+        <div class="section-label">Overview</div>
+        <a class="nav-link" href="#home">Home</a>
+
+        <div class="section-label">Reports</div>
+        <a class="nav-link" href="#query-matrix">Query Matrix</a>
+        <a class="nav-link" href="#baseline">Baseline Latency</a>
+        <a class="nav-link" href="#stream-mix">Stream Mix</a>
+        <a class="nav-link" href="#param-sweep">Param Sweep</a>
+        <a class="nav-link" href="#rknn-mutate">RkNN Mutate Cost</a>
+        <a class="nav-link" href="#seed-hint">Seed Hint</a>
+        <a class="nav-link" href="#from-entry">From Entry</a>
+
+        <div class="section-label">Benches</div>
+        <a class="nav-link" href="#benches">Criterion Export</a>
+      </nav>
+      <main id="view"></main>
+    </div>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

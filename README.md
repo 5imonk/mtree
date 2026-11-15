@@ -4,6 +4,20 @@ Dünnes Harness-Crate: Benchmarks und Reports für [`mtree`](https://github.com/
 
 Erwartet die Library als Sibling-Checkout unter `../mtree` (path-Dependency mit Feature `knn_stats`).
 
+## Visualisierungs-Hub (standalone)
+
+Cursor-unabhängiges Dashboard über alle Report-CSVs und exportierte Criterion-Benches:
+
+```bash
+# aus Repo-Root
+python3 -m http.server 8765
+# Browser: http://localhost:8765/viz/
+```
+
+Hash-Navigation: Query Matrix, Baseline, Stream Mix, Param Sweep, RkNN Mutate,
+Seed Hint, From Entry, Criterion Benches. Fehlende CSVs werden mit dem
+Erzeugungsbefehl angezeigt.
+
 ## Query-Matrix-Report (primär)
 
 Objektiv gemessene Matrix: Baumgröße `n` (log), `k`, Filter (~50 % aktiv) × Modus
@@ -15,11 +29,7 @@ cargo run --release --example knn_query_matrix_report
 
 Schreibt CSV nach `reports/knn_query_matrix.csv` (und stdout) sowie Markdown-Matrizen
 nach stderr. Methodik: scaled node params, 256 feste Query-`EntryId`s, 1 Warmup +
-5 timed Rounds (Median avg ms/Query).
-
-Interaktives Dashboard (nach dem Lauf, Daten inline): Canvas
-`canvases/knn-query-performance.canvas.tsx` (Symlink auf Cursors Canvas-Ordner)
-neben dem Chat öffnen — Varianten vergleichen oder einzelne Kurven betrachten.
+5 timed Rounds (Median avg ms/Query). Viz: Hub → Query Matrix.
 
 ## Baseline-Latency vs. etablierte Libraries
 
@@ -45,8 +55,7 @@ Fairness: Headline für Metrikraum = `mtree_needle_none` vs. vpsearch/vp_tree/ba
 Euclidean/spatial-Spezialisten (Obergrenze). kiddo 5.3 (ImmutableKdTree) statt 6.x wegen
 rustc-MSRV auf diesem Host; `generator` ist auf `0.8.11` gepinnt.
 
-Canvas (Daten inline nach dem Lauf):
-`canvases/knn-baseline-latency.canvas.tsx` neben dem Chat öffnen.
+Viz: Hub → Baseline Latency.
 
 ## Stream-Mix (Phase 5 / Query+Replace)
 
@@ -58,8 +67,7 @@ Workload-nah für Stream-Clustering: n ∈ {50, 200, 1000}, Mixes `query_only` /
 cargo run --release --example knn_stream_mix_report
 ```
 
-Schreibt CSV nach `reports/knn_stream_mix.csv`. Canvas:
-`canvases/knn-stream-mix.canvas.tsx` (inkl. Hotpath-Phasenvergleich).
+Schreibt CSV nach `reports/knn_stream_mix.csv`. Viz: Hub → Stream Mix.
 
 ## Parametrisierungs-Sweep (`max` vs Baumgröße)
 
@@ -75,8 +83,7 @@ cargo run --release --example knn_param_sweep_report
 ```
 
 Schreibt CSV nach `reports/knn_param_sweep.csv` (und stdout) sowie Top-3-Markdown
-pro `n` nach stderr. Canvas (Ridge + Latency-Slices + Empfehlungstabelle):
-`canvases/knn-param-tuning.canvas.tsx` neben dem Chat öffnen.
+pro `n` nach stderr. Viz: Hub → Param Sweep.
 
 ## RkNN Mutate-Cost (mtree 2.1 opt-in Graph)
 
@@ -99,15 +106,30 @@ cargo bench --bench rknn_graph
 
 Schreibt CSV nach `reports/rknn_mutate_cost.csv` (und stdout) sowie Markdown-Pivots
 nach stderr. Methodik: 64 Mutationen/Batch, 1 Warmup + 5 timed Rounds (Median µs/op).
+Viz: Hub → RkNN Mutate Cost.
 
-## Weitere Reports / Benches
+## Seed Hint / From Entry
 
 ```bash
-cargo run --release --example knn_seed_hint_report
-cargo run --release --example knn_from_entry_report
-cargo bench --bench knn_seed_hint   # inkl. Gruppe knn_query_variants
-cargo bench --bench mtree_benches
+cargo run --release --example knn_seed_hint_report   # → reports/knn_seed_hint.csv
+cargo run --release --example knn_from_entry_report  # → reports/knn_from_entry.csv
 ```
+
+Viz: Hub → Seed Hint / From Entry.
+
+## Criterion-Benches → Hub
+
+Nach einem Bench-Lauf die Estimates nach CSV exportieren:
+
+```bash
+cargo bench --bench knn_seed_hint
+cargo bench --bench mtree_benches
+cargo bench --bench rknn_graph
+cargo run --release --example export_criterion_csv   # → reports/criterion_benches.csv
+```
+
+Viz: Hub → Criterion Benches. Zusätzlich bleibt Criterions eigenes HTML unter
+`target/criterion/report/index.html`.
 
 Alternativ per Git statt path — in `Cargo.toml`:
 

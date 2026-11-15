@@ -5,6 +5,7 @@
 //! cargo run --release --example knn_from_entry_report
 //! ```
 //!
+//! Writes CSV to stdout and `reports/knn_from_entry.csv`.
 //! Queries are stored `EntryId`s (not random space needles).
 //!
 //! Modes:
@@ -18,6 +19,9 @@ use mtree::distance::Distance;
 use mtree::{node_params_for_capacity, EntryId, KnnConfig, MTree};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 use std::time::Instant;
 
 use mtree::{reset_knn_visit_stats, take_knn_visit_stats};
@@ -192,7 +196,15 @@ fn measure(
     )
 }
 
-fn print_row(row: &Row, baseline_ms: f64, baseline_routing: f64) {
+fn write_csv_header(out: &mut dyn Write) {
+    writeln!(
+        out,
+        "n,policy,min,max,split,k,mode,avg_ms,avg_routing,avg_leaves,speedup_vs_needle_none,routing_ratio_vs_needle_none"
+    )
+    .unwrap();
+}
+
+fn write_csv_row(out: &mut dyn Write, row: &Row, baseline_ms: f64, baseline_routing: f64) {
     let speedup = if row.avg_ms > 0.0 {
         baseline_ms / row.avg_ms
     } else {
@@ -205,7 +217,8 @@ fn print_row(row: &Row, baseline_ms: f64, baseline_routing: f64) {
     } else {
         f64::NAN
     };
-    println!(
+    writeln!(
+        out,
         "{},{},{},{},{},{},{},{:.6},{:.2},{:.2},{:.4},{:.4}",
         row.n,
         row.policy,
@@ -219,16 +232,21 @@ fn print_row(row: &Row, baseline_ms: f64, baseline_routing: f64) {
         row.avg_leaves,
         speedup,
         routing_ratio
-    );
+    )
+    .unwrap();
 }
 
 fn main() {
+    let report_dir = Path::new("reports");
+    fs::create_dir_all(report_dir).expect("create reports/");
+    let csv_path = report_dir.join("knn_from_entry.csv");
+    let mut file = fs::File::create(&csv_path).expect("create csv");
+    let mut stdout = std::io::stdout().lock();
+    write_csv_header(&mut stdout);
+    write_csv_header(&mut file);
+
     let sizes = [100usize, 200, 500, 1_000, 10_000, 50_000, 100_000];
     let ks = [1usize, 10, 50];
-
-    println!(
-        "n,policy,min,max,split,k,mode,avg_ms,avg_routing,avg_leaves,speedup_vs_needle_none,routing_ratio_vs_needle_none"
-    );
 
     for &n in &sizes {
         let data = gen_data(n, 42);
@@ -272,9 +290,12 @@ fn main() {
                         baseline_ms[ki] = row.avg_ms;
                         baseline_routing[ki] = row.avg_routing;
                     }
-                    print_row(&row, baseline_ms[ki], baseline_routing[ki]);
+                    write_csv_row(&mut stdout, &row, baseline_ms[ki], baseline_routing[ki]);
+                    write_csv_row(&mut file, &row, baseline_ms[ki], baseline_routing[ki]);
                 }
             }
         }
     }
+
+    eprintln!("wrote {}", csv_path.display());
 }

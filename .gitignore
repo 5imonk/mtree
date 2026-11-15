@@ -18,6 +18,13 @@
 *.ts
 *.tsx
 *.jsx
+
+# Keep standalone viz hub tracked (must undo *.html/*.css/*.js above)
+!/viz/
+!/viz/**/
+!/viz/**/*.html
+!/viz/**/*.css
+!/viz/**/*.js
 *.stderr
 *.stdout
 *.err
