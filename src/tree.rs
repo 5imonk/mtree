@@ -37,6 +37,10 @@ where
     pub(crate) distance_fn: Dist,
     /// Opt-in materialisierter kNN-Graph für RkNN (None = aus).
     pub(crate) knn_graph: Option<KnnGraph>,
+    /// Opt-in Active-only-kNN-Graph (Universe = [`active_membership`]).
+    pub(crate) knn_graph_active: Option<KnnGraph>,
+    /// Slot-parallele Membership für den Active-Graphen (leer wenn Active-Graph aus).
+    pub(crate) active_membership: Vec<bool>,
 }
 
 impl<K, V, D, S, Dist> Clone for MTree<K, V, D, S, Dist>
@@ -66,6 +70,8 @@ where
             entry_count: self.entry_count,
             distance_fn: self.distance_fn.clone(),
             knn_graph: self.knn_graph.clone(),
+            knn_graph_active: self.knn_graph_active.clone(),
+            active_membership: self.active_membership.clone(),
         }
     }
 }
@@ -342,6 +348,8 @@ where
             entry_count: 0,
             distance_fn: DynDistance::new(distance_fn),
             knn_graph: None,
+            knn_graph_active: None,
+            active_membership: Vec::new(),
         }
     }
 }
@@ -366,6 +374,8 @@ where
             entry_count: 0,
             distance_fn,
             knn_graph: None,
+            knn_graph_active: None,
+            active_membership: Vec::new(),
         }
     }
 
@@ -374,6 +384,22 @@ where
         let mut tree = Self::with_distance(distance_fn);
         tree.knn_graph = Some(KnnGraph::new(k_max));
         tree
+    }
+
+    /// All-Live- und Active-kNN-Graph (`k_live` / `k_active` ≥ 1).
+    pub fn with_knn_graphs(k_live: usize, k_active: usize, distance_fn: F) -> Self {
+        let mut tree = Self::with_knn_graph(k_live, distance_fn);
+        tree.enable_active_knn_graph(k_active);
+        tree
+    }
+
+    /// Schaltet den Active-only-kNN-Graphen ein (`k_active` ≥ 1).
+    pub fn enable_active_knn_graph(&mut self, k_active: usize) {
+        self.knn_graph_active = Some(KnnGraph::new(k_active));
+        self.active_membership.clear();
+        if !self.by_id.is_empty() {
+            self.active_membership.resize(self.by_id.len(), false);
+        }
     }
 
     /// Erstellt einen neuen M-Tree mit benutzerdefinierten Parametern (monomorph).
@@ -395,6 +421,8 @@ where
             entry_count: 0,
             distance_fn,
             knn_graph: None,
+            knn_graph_active: None,
+            active_membership: Vec::new(),
         }
     }
 
@@ -417,6 +445,18 @@ where
         tree.knn_graph = Some(KnnGraph::new(k_max));
         tree
     }
+
+    /// Wie [`with_capacity_hint_knn_graph`], plus Active-Graph.
+    pub fn with_capacity_hint_knn_graphs(
+        expected_entries: usize,
+        k_live: usize,
+        k_active: usize,
+        distance_fn: F,
+    ) -> Self {
+        let mut tree = Self::with_capacity_hint_knn_graph(expected_entries, k_live, distance_fn);
+        tree.enable_active_knn_graph(k_active);
+        tree
+    }
 }
 
 /// Spezielle Implementierung für Vec<f32> mit euklidischer Distanz
@@ -437,6 +477,8 @@ where
             entry_count: 0,
             distance_fn: EuclideanDistance,
             knn_graph: None,
+            knn_graph_active: None,
+            active_membership: Vec::new(),
         }
     }
 }
@@ -459,6 +501,8 @@ where
             entry_count: 0,
             distance_fn: EuclideanDistance,
             knn_graph: None,
+            knn_graph_active: None,
+            active_membership: Vec::new(),
         }
     }
 }
@@ -531,6 +575,17 @@ where
             graph.ensure_slot(index);
             graph.release_slot(EntryId::from_index(index));
         }
+        if let Some(graph) = self.knn_graph_active.as_mut() {
+            graph.ensure_slot(index);
+            graph.release_slot(EntryId::from_index(index));
+        }
+        if self.knn_graph_active.is_some() {
+            if self.active_membership.len() <= index {
+                self.active_membership.resize(index + 1, false);
+            } else {
+                self.active_membership[index] = false;
+            }
+        }
         EntryId::from_index(index)
     }
 
@@ -539,6 +594,12 @@ where
         self.by_id[index] = None;
         if let Some(graph) = self.knn_graph.as_mut() {
             graph.release_slot(id);
+        }
+        if let Some(graph) = self.knn_graph_active.as_mut() {
+            graph.release_slot(id);
+        }
+        if let Some(slot) = self.active_membership.get_mut(index) {
+            *slot = false;
         }
         self.free_list.push(index);
         self.entry_count -= 1;
@@ -664,6 +725,8 @@ where
         }
 
         self.knn_graph_maintain_insert(id, knn_hits);
+        // Active-Graph: neue Inserts starten idle; Membership kommt über
+        // `set_active_membership` / `rebuild_active_graph`.
 
         Ok(id)
     }
@@ -1257,6 +1320,9 @@ where
         };
 
         self.knn_graph_maintain_erase(id);
+        if self.is_active_member(id) {
+            self.knn_graph_active_maintain_erase(id, true);
+        }
         self.tree_erase(id);
         self.index_remove(&key, identity_hash);
         self.release_slot(id);
@@ -1321,7 +1387,11 @@ where
             }
         }
 
+        let was_active = self.is_active_member(id);
         self.knn_graph_maintain_erase(id);
+        if was_active {
+            self.knn_graph_active_maintain_erase(id, true);
+        }
         self.tree_erase(id);
 
         self.by_id
@@ -1345,6 +1415,10 @@ where
         }
 
         self.knn_graph_maintain_insert(id, None);
+        if was_active {
+            self.set_active_member_bit(id, true);
+            self.knn_graph_active_maintain_insert(id, true);
+        }
 
         Ok(())
     }
@@ -1689,6 +1763,10 @@ where
         if let Some(graph) = self.knn_graph.as_mut() {
             graph.clear();
         }
+        if let Some(graph) = self.knn_graph_active.as_mut() {
+            graph.clear();
+        }
+        self.active_membership.clear();
     }
 
     /// Anzahl der Einträge

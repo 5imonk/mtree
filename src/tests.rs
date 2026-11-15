@@ -2225,4 +2225,259 @@ mod tests {
         assert_rknn(&tree, &live, outside, 0.0, op);
         assert_rknn(&tree, &live, outside, epsilon_from(&999_999u64), op);
     }
+
+    // ---- Active kNN-Graph ----
+
+    fn new_tree_i64_graphs(k_live: usize, k_active: usize) -> TreeI64 {
+        MTree::with_knn_graphs(k_live, k_active, Euclid2d)
+    }
+
+    fn naive_rknn_active(
+        data: &[((i64, i64), crate::EntryId)],
+        active: &HashSet<crate::EntryId>,
+        needle: &(i64, i64),
+        k: usize,
+    ) -> Vec<(crate::EntryId, f64)> {
+        let dist = Euclid2d;
+        let mut out = Vec::new();
+        for &(key_o, id_o) in data {
+            if !active.contains(&id_o) {
+                continue;
+            }
+            let mut dists: Vec<f64> = data
+                .iter()
+                .filter(|(_, id)| *id != id_o && active.contains(id))
+                .map(|(key_p, _)| dist.distance(&key_o, key_p))
+                .collect();
+            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let knn_d = if dists.len() < k {
+                f64::INFINITY
+            } else {
+                dists[k - 1]
+            };
+            let d = dist.distance(needle, &key_o);
+            if d <= knn_d {
+                out.push((id_o, d));
+            }
+        }
+        out.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.slot_index().cmp(&b.0.slot_index()))
+        });
+        out
+    }
+
+    fn assert_active_graph_invariants(tree: &TreeI64) {
+        let k_max = tree.knn_graph_active_k_max().expect("active graph on");
+        for id in tree.iter() {
+            if !tree.is_active_member(id) {
+                assert!(tree.knn_graph_active_neighbors(id).is_none());
+                continue;
+            }
+            let list = tree.knn_graph_active_neighbors(id).unwrap_or(&[]);
+            assert!(list.len() <= k_max);
+            for &(nb, _) in list {
+                assert!(tree.is_active_member(nb), "idle neighbor in active forward");
+                assert!(tree.key(nb).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn rknn_active_disabled_returns_none() {
+        let mut tree = new_tree_i64_graph(3);
+        let id = tree.insert((0, 0), "a".into()).unwrap();
+        assert!(!tree.knn_graph_active_enabled());
+        assert!(tree.rknn_active_search(&(0, 0), 1).is_none());
+        assert!(tree.knn_graph_active_neighbors(id).is_none());
+    }
+
+    #[test]
+    fn rknn_active_rebuild_matches_naive() {
+        let k = 4usize;
+        let mut tree = new_tree_i64_graphs(k, k);
+        let mut data = Vec::new();
+        for i in 0..35 {
+            let key = (i as i64 % 6, i as i64 / 6);
+            let id = tree.insert(key, format!("v{i}")).unwrap();
+            data.push((key, id));
+        }
+        let active: HashSet<_> = data.iter().step_by(2).map(|(_, id)| *id).collect();
+        let active_vec: Vec<_> = active.iter().copied().collect();
+        tree.rebuild_active_graph(&active_vec);
+        assert_active_graph_invariants(&tree);
+        for &(needle, id) in &data {
+            if !active.contains(&id) {
+                continue;
+            }
+            let got = tree.rknn_active_search(&needle, k).unwrap();
+            let expect = naive_rknn_active(&data, &active, &needle, k);
+            let got_ids: HashSet<_> = got.iter().map(|(i, _)| *i).collect();
+            let exp_ids: HashSet<_> = expect.iter().map(|(i, _)| *i).collect();
+            assert_eq!(got_ids, exp_ids, "needle={needle:?}");
+        }
+    }
+
+    #[test]
+    fn rknn_active_membership_flip_batch() {
+        let k = 3usize;
+        let mut tree = new_tree_i64_graphs(k, k);
+        let mut data = Vec::new();
+        for i in 0..24 {
+            let key = (i, 0);
+            let id = tree.insert(key, format!("{i}")).unwrap();
+            data.push((key, id));
+        }
+        // Initially activate first half via small diffs (incremental path).
+        let first: Vec<_> = data[..12].iter().map(|(_, id)| *id).collect();
+        for chunk in first.chunks(2) {
+            tree.set_active_membership(chunk, &[]);
+        }
+        assert_eq!(
+            tree.iter().filter(|&id| tree.is_active_member(id)).count(),
+            12
+        );
+        assert_active_graph_invariants(&tree);
+
+        let to_idle: Vec<_> = data[0..6].iter().map(|(_, id)| *id).collect();
+        let to_active: Vec<_> = data[12..18].iter().map(|(_, id)| *id).collect();
+        tree.set_active_membership(&to_active, &to_idle);
+
+        let active: HashSet<_> = tree
+            .iter()
+            .filter(|&id| tree.is_active_member(id))
+            .collect();
+        assert_eq!(active.len(), 12);
+        for id in &to_idle {
+            assert!(!active.contains(id));
+        }
+        for id in &to_active {
+            assert!(active.contains(id));
+        }
+        assert_active_graph_invariants(&tree);
+
+        let live: Vec<_> = data.clone();
+        for &(needle, id) in &live {
+            if !active.contains(&id) {
+                continue;
+            }
+            let got = tree.rknn_active_search(&needle, k).unwrap();
+            let expect = naive_rknn_active(&live, &active, &needle, k);
+            let got_ids: HashSet<_> = got.iter().map(|(i, _)| *i).collect();
+            let exp_ids: HashSet<_> = expect.iter().map(|(i, _)| *i).collect();
+            assert_eq!(got_ids, exp_ids);
+        }
+    }
+
+    #[test]
+    fn rknn_active_tree_erase_idle_leaves_active_intact() {
+        let k = 3usize;
+        let mut tree = new_tree_i64_graphs(k, k);
+        let mut ids = Vec::new();
+        for i in 0..16 {
+            ids.push(tree.insert((i, 0), format!("{i}")).unwrap());
+        }
+        tree.rebuild_active_graph(&ids[..8]);
+        let idle = ids[10];
+        assert!(!tree.is_active_member(idle));
+        let before: HashSet<_> = tree
+            .iter()
+            .filter(|&id| tree.is_active_member(id))
+            .collect();
+        assert!(tree.erase_by_id(idle));
+        let after: HashSet<_> = tree
+            .iter()
+            .filter(|&id| tree.is_active_member(id))
+            .collect();
+        assert_eq!(before, after);
+        assert_active_graph_invariants(&tree);
+    }
+
+    #[test]
+    fn rknn_active_tree_erase_active_updates_graph() {
+        let k = 3usize;
+        let mut tree = new_tree_i64_graphs(k, k);
+        let mut ids = Vec::new();
+        for i in 0..16 {
+            ids.push(tree.insert((i, 0), format!("{i}")).unwrap());
+        }
+        tree.rebuild_active_graph(&ids[..10]);
+        let victim = ids[2];
+        assert!(tree.is_active_member(victim));
+        assert!(tree.erase_by_id(victim));
+        assert!(!tree.is_active_member(victim));
+        assert_active_graph_invariants(&tree);
+        let active: HashSet<_> = tree
+            .iter()
+            .filter(|&id| tree.is_active_member(id))
+            .collect();
+        let live: Vec<_> = ids
+            .iter()
+            .filter(|id| tree.key(**id).is_some())
+            .map(|&id| (tree.key(id).unwrap(), id))
+            .collect();
+        for &(needle, id) in &live {
+            if !active.contains(&id) {
+                continue;
+            }
+            let got = tree.rknn_active_search(&needle, k).unwrap();
+            let expect = naive_rknn_active(&live, &active, &needle, k);
+            let got_ids: HashSet<_> = got.iter().map(|(i, _)| *i).collect();
+            let exp_ids: HashSet<_> = expect.iter().map(|(i, _)| *i).collect();
+            assert_eq!(got_ids, exp_ids);
+        }
+    }
+
+    #[test]
+    fn rknn_active_rebuild_equiv_incremental_small_flips() {
+        let k = 4usize;
+        let mut rebuild = new_tree_i64_graphs(k, k);
+        let mut incr = new_tree_i64_graphs(k, k);
+        let mut data = Vec::new();
+        for i in 0..20 {
+            let key = (i % 5, i / 5);
+            let a = rebuild.insert(key, format!("r{i}")).unwrap();
+            let b = incr.insert(key, format!("i{i}")).unwrap();
+            data.push((key, a, b));
+        }
+        let init: Vec<_> = data.iter().take(10).map(|(_, a, _)| *a).collect();
+        let init_b: Vec<_> = data.iter().take(10).map(|(_, _, b)| *b).collect();
+        rebuild.rebuild_active_graph(&init);
+        incr.rebuild_active_graph(&init_b);
+
+        // One small flip on each (should take incremental path on incr).
+        let to_idle_a = [data[0].1];
+        let to_active_a = [data[10].1];
+        let to_idle_b = [data[0].2];
+        let to_active_b = [data[10].2];
+        rebuild.set_active_membership(&to_active_a, &to_idle_a);
+        incr.set_active_membership(&to_active_b, &to_idle_b);
+
+        for (key, a, b) in &data {
+            assert_eq!(
+                rebuild.is_active_member(*a),
+                incr.is_active_member(*b),
+                "membership mismatch at {key:?}"
+            );
+            if !rebuild.is_active_member(*a) {
+                continue;
+            }
+            let na = rebuild.knn_graph_active_neighbors(*a).unwrap_or(&[]);
+            let nb = incr.knn_graph_active_neighbors(*b).unwrap_or(&[]);
+            let ka: Vec<_> = na
+                .iter()
+                .map(|(id, d)| (rebuild.key(*id).unwrap(), *d))
+                .collect();
+            let kb: Vec<_> = nb
+                .iter()
+                .map(|(id, d)| (incr.key(*id).unwrap(), *d))
+                .collect();
+            assert_eq!(ka.len(), kb.len(), "forward len at {key:?}");
+            for (xa, xb) in ka.iter().zip(kb.iter()) {
+                assert_eq!(xa.0, xb.0);
+                assert!((xa.1 - xb.1).abs() < 1e-9);
+            }
+        }
+    }
 }

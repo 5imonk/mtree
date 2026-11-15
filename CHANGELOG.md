@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Active-RkNN (Option A): zweiter `knn_graph_active` + Membership-Bitset + `max_knn_distance_active`.
+- APIs: `with_knn_graphs` / `enable_active_knn_graph` / `with_capacity_hint_knn_graphs`, `set_active_membership`, `rebuild_active_graph`, `rknn_active_search` / `rknn_active_from_entry`, `knn_graph_active_neighbors`.
+- Batch-Diff mit Auto-Rebuild-Schwelle (~25%); Tree-Erase/Update nur bei Active-Membership.
+- SDO (Sibling): Active-Graph nach `fit` syncen; Graph-χ bevorzugt Active-Listen.
+
 ## [2.1.0]
 
 Opt-in kNN-Graph / RkNN (Side-State A1–A5). Default-Bäume ohne Graph unverändert.

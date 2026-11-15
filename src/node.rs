@@ -178,6 +178,8 @@ where
     pub furthest_descendant: Option<EntryId>,
     /// Max der `knn_distance`-Werte im Subtree (RkNN-Pruning); 0 wenn Graph aus.
     pub max_knn_distance: f64,
+    /// Max der Active-Graph-`knn_distance`-Werte im Subtree; 0 wenn Active-Graph aus.
+    pub max_knn_distance_active: f64,
     pub parent: Option<NodeId>,
     pub parent_distance: f64,
     _value: std::marker::PhantomData<fn() -> V>,
@@ -202,6 +204,7 @@ where
             covering_radius: self.covering_radius,
             furthest_descendant: self.furthest_descendant,
             max_knn_distance: self.max_knn_distance,
+            max_knn_distance_active: self.max_knn_distance_active,
             parent: self.parent,
             parent_distance: self.parent_distance,
             _value: std::marker::PhantomData,
@@ -225,6 +228,7 @@ where
             covering_radius: 0.0,
             furthest_descendant: None,
             max_knn_distance: 0.0,
+            max_knn_distance_active: 0.0,
             parent: None,
             parent_distance: 0.0,
             _value: std::marker::PhantomData,
@@ -247,6 +251,7 @@ where
             covering_radius: 0.0,
             furthest_descendant: None,
             max_knn_distance: 0.0,
+            max_knn_distance_active: 0.0,
             parent: None,
             parent_distance: 0.0,
             _value: std::marker::PhantomData,
