@@ -8,7 +8,7 @@ Eine hochperformante Implementierung der M-Tree Datenstruktur in Rust mit SIMD-O
 - **Ownership-Modell**: Mutation nur unter `&mut MTree`; Queries unter `&self` ohne per-node Locks (Arena + `NodeId`)
 - **Parallelität**: Viele parallele Reader (`&MTree`) sind erlaubt und gewollt (z. B. Rayon). Writer nur exklusiv (`&mut MTree`); kein concurrent Mutate desselben Baums — sonst externe Sync oder eigene Bäume/Shards
 - **Einheitliche Such-API**: `knn_search` / `knn_from_entry` / `search` / `range_search` mit optionalem Filter und Annulus-Config
-- **Opt-in kNN-Graph / RkNN**: `with_knn_graph` / `rknn_search` / `rknn_from_entry` (siehe [`docs/RKNN_SDO_PLAN.md`](docs/RKNN_SDO_PLAN.md))
+- **Opt-in kNN-Graph / RkNN**: `with_knn_graph` / `rknn_search` / `rknn_from_entry`; Active-Schicht via `with_knn_graphs` / `set_active_membership` / `rknn_active_*` (siehe [`docs/RKNN_SDO_PLAN.md`](docs/RKNN_SDO_PLAN.md))
 - **Dual-Index**: Stabile `EntryId` (O(1)) plus `HashMap<K, EntryId>` für Schlüssel-Lookup
 
 Performance / Stream-Clustering Hotpath (Branch-Plan): [`docs/PERF_HOTPATH_STREAM.md`](docs/PERF_HOTPATH_STREAM.md).  

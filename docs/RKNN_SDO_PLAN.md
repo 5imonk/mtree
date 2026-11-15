@@ -12,7 +12,8 @@ Umsetzungsplan. Stand: 2026-11-14 — **A1–A5 in mtree 2.1.0** (opt-in Graph);
 
 Teure **Voll-Requeries** und **Cutoff Full-Invalidate + N× `knn_from_observer`** ersetzen durch selektive Updates. Dieselbe RkNN-Semantik in zwei Grundmengen, plus saubere Mutation (Insert / Erase / Replace).
 
-**Out of scope (Phase 1):** Idle/Active-Filter-Feinheit (`knn_active`); zuerst Live-/ungefilterte Logik. Active später als Filter auf denselben Strukturen.
+**Phase 1:** Live-/ungefilterte RkNN-Logik (A1–A5).
+**Active (Option A):** zweiter Active-only-`KnnGraph` auf demselben Live-Tree; Membership explizit via `set_active_membership` / `rebuild_active_graph` (nicht Predicate-Diff). Siehe Abschnitt 12.
 
 ```mermaid
 flowchart LR
@@ -233,7 +234,7 @@ Checkliste:
 
 - ELKI-Code portieren (AGPL)
 - MkTab-Distanzvektoren ohne IDs (Erase/Cutoff brauchen Nachbar-Identität)
-- Active/Idle in Phase 1
+- Active als zweiter MTree (Option B verworfen)
 - Batch-Punkte in den M-Tree indexieren
 - Index-Wechsel (HNSW o. ä.) — siehe Ideendokument; Default bleibt mtree + Side-Graph
 
@@ -269,4 +270,19 @@ Umgesetzt in **mtree** (opt-in Graph, Default unverändert):
 
 API-Skizze: `MTree::with_knn_graph(k_max, dist)`, `with_capacity_hint_knn_graph`, `insert_with_knn_hits`, `rknn_search`, `rknn_from_entry`, `knn_graph_neighbors`.
 
-**Noch offen:** Layer B/C (sdo Cutoff/Batch), Active-Filter.
+**Active (Option A):** `knn_graph_active` + Membership-Bitset + `max_knn_distance_active`; APIs `with_knn_graphs` / `enable_active_knn_graph`, `set_active_membership`, `rebuild_active_graph`, `rknn_active_*`. SDO: `TreeIndex` startet mit beiden Graphen; `fit` → `sync_active_knn_graph`; Graph-χ bevorzugt Active-Listen.
+
+**Noch offen:** Layer B/C selektive Cutoffs/Batch-Requery (teilweise: `invalidate_graph_for`).
+
+---
+
+## 12. Active-RkNN (Option A) — Stand
+
+| Stück | Status |
+|-------|--------|
+| Zweiter `KnnGraph` + Membership | erledigt |
+| `rebuild_active_graph` / Batch-Diff + Auto-Rebuild (~25%) | erledigt |
+| Tree-Erase/Insert-Kopplung nur bei Membership | erledigt |
+| `rknn_active_*` | erledigt |
+| SDO `sync_active_knn_graph` nach `fit` | erledigt |
+| Graph-Cutoff aus Active-Listen | erledigt (Fallback: `knn_active_from_observer`) |
