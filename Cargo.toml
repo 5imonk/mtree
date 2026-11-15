@@ -27,3 +27,7 @@ harness = false
 [[bench]]
 name = "knn_seed_hint"
 harness = false
+
+[[bench]]
+name = "rknn_graph"
+harness = false

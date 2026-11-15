@@ -78,6 +78,28 @@ Schreibt CSV nach `reports/knn_param_sweep.csv` (und stdout) sowie Top-3-Markdow
 pro `n` nach stderr. Canvas (Ridge + Latency-Slices + Empfehlungstabelle):
 `canvases/knn-param-tuning.canvas.tsx` neben dem Chat öffnen.
 
+## RkNN Mutate-Cost (mtree 2.1 opt-in Graph)
+
+Matrix über Modellgröße `n` ∈ {100…10k} und `k` ∈ {1,5,10,20} × `insert`/`erase`.
+Zerlegt den Maintenance-Aufwand in Phasen:
+
+- **discover** — Insert: `rknn_search` vor der Mutation; Erase: Reverse-Opfer via
+  Forward-Listen-Scan (`knn_graph_neighbors`)
+- **mutate_graph** / **mutate_plain** — geometrisches Insert/Erase (± eingebaute
+  Graph-Maintenance)
+- **refresh** — Forward-`knn_from_entry` je Affected (+ `knn_stats` Routing/Leaves
+  als Distanz-/Visit-Proxy)
+- **selective_total** ≈ discover + plain_mutate + refresh (Vergleich zu
+  `mutate_graph`)
+
+```bash
+cargo run --release --example rknn_mutate_cost_report
+cargo bench --bench rknn_graph
+```
+
+Schreibt CSV nach `reports/rknn_mutate_cost.csv` (und stdout) sowie Markdown-Pivots
+nach stderr. Methodik: 64 Mutationen/Batch, 1 Warmup + 5 timed Rounds (Median µs/op).
+
 ## Weitere Reports / Benches
 
 ```bash

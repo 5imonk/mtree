@@ -431,3 +431,340 @@ pub fn measure_median(
         avg_leaves: median_f64(&mut leaf_samples),
     }
 }
+
+// ---------------------------------------------------------------------------
+// RkNN mutate / discover / refresh (mtree 2.1 opt-in kNN-graph)
+// ---------------------------------------------------------------------------
+
+/// Model sizes for RkNN maintenance reports (cheaper than full forward matrix).
+pub const RKNN_LOG_SIZES: &[usize] = &[100, 500, 1_000, 2_000, 5_000, 10_000];
+/// `k_max` / query-`k` for RkNN maintenance matrix.
+pub const RKNN_KS: &[usize] = &[1, 5, 10, 20];
+/// Mutations per timed round for RkNN phase metrics.
+pub const RKNN_MUTATE_BATCH: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RknnMutateOp {
+    Insert,
+    Erase,
+}
+
+impl RknnMutateOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RknnMutateOp::Insert => "insert",
+            RknnMutateOp::Erase => "erase",
+        }
+    }
+
+    pub fn all() -> [RknnMutateOp; 2] {
+        [RknnMutateOp::Insert, RknnMutateOp::Erase]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MutatePhaseMetrics {
+    /// Median µs / op for insert|erase with knn-graph maintenance.
+    pub mutate_us: f64,
+    /// Median µs / op without knn-graph (fair geometric baseline).
+    pub plain_mutate_us: f64,
+    /// Median µs / op to discover affected set (rknn_search or reverse scan).
+    pub discover_us: f64,
+    /// Median |affected| per op.
+    pub affected_count: f64,
+    /// Median µs / op to refresh all affected via forward knn_from_entry.
+    pub refresh_us_total: f64,
+    /// Median routing-node visits per affected refresh (`knn_stats`).
+    pub avg_routing: f64,
+    /// Median leaf visits per affected refresh (`knn_stats`).
+    pub avg_leaves: f64,
+}
+
+impl MutatePhaseMetrics {
+    /// Selective SDO-style total: discover + plain mutate + refresh.
+    pub fn selective_total_us(self) -> f64 {
+        self.discover_us + self.plain_mutate_us + self.refresh_us_total
+    }
+}
+
+/// Build tree with opt-in kNN-graph (`k_max`).
+pub fn build_graph_tree(
+    k_max: usize,
+    expected_entries: usize,
+    data: &[(Key2d, Active)],
+) -> (ExperimentTree, Vec<EntryId>) {
+    let mut tree = MTree::with_capacity_hint_knn_graph(expected_entries, k_max, Euclid2d);
+    let mut ids = Vec::with_capacity(data.len());
+    for &(key, active) in data {
+        ids.push(tree.insert(key, active).unwrap());
+    }
+    (tree, ids)
+}
+
+/// Build plain tree (no knn-graph) with capacity hint.
+pub fn build_plain_tree(
+    expected_entries: usize,
+    data: &[(Key2d, Active)],
+) -> (ExperimentTree, Vec<EntryId>) {
+    let mut tree = MTree::with_capacity_hint(expected_entries, Euclid2d);
+    let mut ids = Vec::with_capacity(data.len());
+    for &(key, active) in data {
+        ids.push(tree.insert(key, active).unwrap());
+    }
+    (tree, ids)
+}
+
+/// Owners that list `q` in their materialised forward kNN (public reverse via scan).
+pub fn reverse_owners(tree: &ExperimentTree, q: EntryId, ids: &[EntryId]) -> Vec<EntryId> {
+    let mut out = Vec::new();
+    for &id in ids {
+        if id == q {
+            continue;
+        }
+        if let Some(nbrs) = tree.knn_graph_neighbors(id) {
+            if nbrs.iter().any(|(nid, _)| *nid == q) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Forward-refresh each affected entry (`knn_from_entry`); for benches/reports.
+pub fn refresh_affected_knn(tree: &ExperimentTree, affected: &[EntryId], k: usize) {
+    for &id in affected {
+        black_box(
+            tree.knn_from_entry(id, k, false, ())
+                .expect("refresh from_entry"),
+        );
+    }
+}
+
+/// Returns `(refresh_us_total, routing_visits_total, leaf_visits_total)`.
+fn refresh_affected(tree: &ExperimentTree, affected: &[EntryId], k: usize) -> (f64, u64, u64) {
+    if affected.is_empty() {
+        return (0.0, 0, 0);
+    }
+    reset_knn_visit_stats();
+    let start = Instant::now();
+    refresh_affected_knn(tree, affected, k);
+    let us = start.elapsed().as_secs_f64() * 1e6;
+    let s = take_knn_visit_stats();
+    (us, s.routing_nodes, s.leaves)
+}
+
+/// Warmup + timed rounds: per-op medians for mutate / discover / refresh phases.
+pub fn measure_rknn_mutate_phases(
+    op: RknnMutateOp,
+    n: usize,
+    k: usize,
+    rounds: usize,
+) -> MutatePhaseMetrics {
+    let data = gen_active_data(n, 42 + n as u64);
+    let (mut graph, mut graph_ids) = build_graph_tree(k, n + RKNN_MUTATE_BATCH, &data);
+    let (mut plain, mut plain_ids) = build_plain_tree(n + RKNN_MUTATE_BATCH, &data);
+    debug_assert_eq!(graph_ids.len(), plain_ids.len());
+
+    let batch = RKNN_MUTATE_BATCH.min(n.max(1));
+    let mut rng = StdRng::seed_from_u64(91 + (n as u64) * 17 + k as u64);
+    let mut occupied: std::collections::HashSet<Key2d> =
+        data.iter().map(|&(key, _)| key).collect();
+
+    let mut mutate_samples = Vec::with_capacity(rounds);
+    let mut plain_samples = Vec::with_capacity(rounds);
+    let mut discover_samples = Vec::with_capacity(rounds);
+    let mut affected_samples = Vec::with_capacity(rounds);
+    let mut refresh_samples = Vec::with_capacity(rounds);
+    let mut routing_samples = Vec::with_capacity(rounds);
+    let mut leaf_samples = Vec::with_capacity(rounds);
+
+    // One discarded warmup round.
+    run_rknn_mutate_round(
+        op,
+        k,
+        batch,
+        &mut rng,
+        &mut occupied,
+        &mut graph,
+        &mut graph_ids,
+        &mut plain,
+        &mut plain_ids,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        true,
+    );
+
+    for _ in 0..rounds {
+        run_rknn_mutate_round(
+            op,
+            k,
+            batch,
+            &mut rng,
+            &mut occupied,
+            &mut graph,
+            &mut graph_ids,
+            &mut plain,
+            &mut plain_ids,
+            &mut mutate_samples,
+            &mut plain_samples,
+            &mut discover_samples,
+            &mut affected_samples,
+            &mut refresh_samples,
+            &mut routing_samples,
+            &mut leaf_samples,
+            false,
+        );
+    }
+
+    MutatePhaseMetrics {
+        mutate_us: median_f64(&mut mutate_samples),
+        plain_mutate_us: median_f64(&mut plain_samples),
+        discover_us: median_f64(&mut discover_samples),
+        affected_count: median_f64(&mut affected_samples),
+        refresh_us_total: median_f64(&mut refresh_samples),
+        avg_routing: median_f64(&mut routing_samples),
+        avg_leaves: median_f64(&mut leaf_samples),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rknn_mutate_round(
+    op: RknnMutateOp,
+    k: usize,
+    batch: usize,
+    rng: &mut StdRng,
+    occupied: &mut std::collections::HashSet<Key2d>,
+    graph: &mut ExperimentTree,
+    graph_ids: &mut Vec<EntryId>,
+    plain: &mut ExperimentTree,
+    plain_ids: &mut Vec<EntryId>,
+    mutate_samples: &mut Vec<f64>,
+    plain_samples: &mut Vec<f64>,
+    discover_samples: &mut Vec<f64>,
+    affected_samples: &mut Vec<f64>,
+    refresh_samples: &mut Vec<f64>,
+    routing_samples: &mut Vec<f64>,
+    leaf_samples: &mut Vec<f64>,
+    discard: bool,
+) {
+    let mut mutate_us = 0.0;
+    let mut plain_us = 0.0;
+    let mut discover_us = 0.0;
+    let mut affected_sum = 0.0;
+    let mut refresh_us = 0.0;
+    let mut routing_total = 0u64;
+    let mut leaf_total = 0u64;
+    let mut refresh_ops = 0usize;
+
+    match op {
+        RknnMutateOp::Insert => {
+            let keys: Vec<Key2d> = (0..batch)
+                .map(|_| {
+                    let key = fresh_key_2d(rng, occupied);
+                    occupied.insert(key);
+                    key
+                })
+                .collect();
+
+            for &key in &keys {
+                let t0 = Instant::now();
+                let affected = graph
+                    .rknn_search(&key, k)
+                    .expect("rknn_search with graph");
+                discover_us += t0.elapsed().as_secs_f64() * 1e6;
+                affected_sum += affected.len() as f64;
+
+                let affected_ids: Vec<EntryId> = affected.iter().map(|(id, _)| *id).collect();
+                let (rus, routing, leaves) = refresh_affected(graph, &affected_ids, k);
+                refresh_us += rus;
+                routing_total += routing;
+                leaf_total += leaves;
+                refresh_ops += affected_ids.len();
+
+                let t1 = Instant::now();
+                let gid = graph.insert(key, true).expect("graph insert");
+                mutate_us += t1.elapsed().as_secs_f64() * 1e6;
+
+                let t2 = Instant::now();
+                let pid = plain.insert(key, true).expect("plain insert");
+                plain_us += t2.elapsed().as_secs_f64() * 1e6;
+
+                // Restore membership.
+                occupied.remove(&key);
+                assert!(graph.erase_by_id(gid));
+                assert!(plain.erase_by_id(pid));
+            }
+        }
+        RknnMutateOp::Erase => {
+            for _ in 0..batch {
+                let idx = rng.gen_range(0..graph_ids.len());
+                let gid = graph_ids[idx];
+                let pid = plain_ids[idx];
+                let key = graph.key(gid).expect("erase key");
+                let active = graph.payload(gid).expect("erase payload");
+
+                let t0 = Instant::now();
+                let victims = reverse_owners(graph, gid, graph_ids);
+                discover_us += t0.elapsed().as_secs_f64() * 1e6;
+                affected_sum += victims.len() as f64;
+
+                let (rus, routing, leaves) = refresh_affected(graph, &victims, k);
+                refresh_us += rus;
+                routing_total += routing;
+                leaf_total += leaves;
+                refresh_ops += victims.len();
+
+                let t1 = Instant::now();
+                assert!(graph.erase_by_id(gid));
+                mutate_us += t1.elapsed().as_secs_f64() * 1e6;
+
+                let t2 = Instant::now();
+                assert!(plain.erase_by_id(pid));
+                plain_us += t2.elapsed().as_secs_f64() * 1e6;
+
+                occupied.remove(&key);
+                let new_gid = graph.insert(key, active).expect("graph restore");
+                let new_pid = plain.insert(key, active).expect("plain restore");
+                occupied.insert(key);
+                graph_ids[idx] = new_gid;
+                plain_ids[idx] = new_pid;
+            }
+        }
+    }
+
+    if discard {
+        return;
+    }
+
+    let b = batch as f64;
+    mutate_samples.push(mutate_us / b);
+    plain_samples.push(plain_us / b);
+    discover_samples.push(discover_us / b);
+    affected_samples.push(affected_sum / b);
+    refresh_samples.push(refresh_us / b);
+    let denom = refresh_ops.max(1) as f64;
+    routing_samples.push(routing_total as f64 / denom);
+    leaf_samples.push(leaf_total as f64 / denom);
+}
+
+#[cfg(test)]
+mod rknn_mutate_tests {
+    use super::*;
+
+    #[test]
+    fn measure_insert_and_erase_smoke() {
+        for op in RknnMutateOp::all() {
+            let m = measure_rknn_mutate_phases(op, 80, 5, 2);
+            assert!(m.mutate_us > 0.0, "{op:?} mutate_us");
+            assert!(m.plain_mutate_us > 0.0, "{op:?} plain_mutate_us");
+            assert!(m.discover_us >= 0.0, "{op:?} discover_us");
+            assert!(m.affected_count >= 0.0, "{op:?} affected");
+            assert!(m.selective_total_us() >= m.plain_mutate_us, "{op:?} selective");
+        }
+    }
+}
