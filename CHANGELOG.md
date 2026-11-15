@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [2.1.1]
+
+Opt-in Active-RkNN-Schicht (Option A). Default-Bäume ohne Graph unverändert.
+
 ### Added
 
 - Active-RkNN (Option A): zweiter `knn_graph_active` + Membership-Bitset + `max_knn_distance_active`.
